@@ -79,6 +79,9 @@ async fn clear_namespace(
         sink.apply(Action::DeleteTag {
             namespace: namespace.clone(),
             tag: tag?,
+            // The namespace belongs to no configured repository, so every tag
+            // in it goes whatever it points at.
+            target: None,
         })
         .await?;
     }

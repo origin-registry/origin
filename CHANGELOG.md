@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A response whose `Content-Length` exceeds what the allocator can serve fails the request instead of aborting the process, since the header no longer sizes the buffer it is collected into.
 - An upstream token endpoint answering with an absurd `expires_in` no longer panics the task that caches the token, which on `angos worker` cost a worker slot per such response.
 - `angos prune` leaves a manifest revision alone while its record is younger than `gc_grace_secs`, so retention and orphan-namespace clearing no longer delete the platform manifests of a multi-arch push before the index that names them lands.
+- A retention tag deletion re-reads the tag and skips it when it points somewhere else by then, so a re-push landing between the policy snapshot and the delete is no longer swept away.
 
 ## 1.7.1
 

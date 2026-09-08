@@ -376,8 +376,31 @@ impl Executor {
 
     /// Retention tag deletion through the registry's standard delete path, so
     /// it emits the delete events and, per its internal actor, mirrors only to
-    /// `prune = true` downstreams.
-    async fn delete_tag(&self, namespace: Namespace, tag: Tag) -> Result<(), Error> {
+    /// `prune = true` downstreams. A `target` is the digest the tag was judged
+    /// on, and the tag is left alone when it no longer points there.
+    async fn delete_tag(
+        &self,
+        namespace: Namespace,
+        tag: Tag,
+        target: Option<Digest>,
+    ) -> Result<(), Error> {
+        if let Some(target) = target {
+            // Uncached, like the digest-delete guard: a re-push landed on
+            // another replica within the link-cache TTL must be visible here,
+            // which is the whole point of re-reading.
+            let current = self
+                .metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+                .await?;
+            if current.target != target {
+                info!(
+                    "skipping tag deletion: '{namespace}:{tag}' now points at '{}', not the judged '{target}'",
+                    current.target
+                );
+                return Ok(());
+            }
+        }
+
         self.retention_registry()?
             .delete_manifest(
                 Some(EventActor::internal(RETENTION_ACTOR)),
@@ -661,7 +684,11 @@ impl ActionSink for Executor {
                 link,
                 target,
             } => self.recreate_link(namespace, link, target).await,
-            Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
+            Action::DeleteTag {
+                namespace,
+                tag,
+                target,
+            } => self.delete_tag(namespace, tag, target).await,
             Action::DemoteTagEntry {
                 namespace,
                 tag,
@@ -728,7 +755,7 @@ impl ActionSink for Executor {
 mod tests {
     use std::str::FromStr;
 
-    use chrono::DateTime;
+    use chrono::{DateTime, TimeDelta};
     use tempfile::TempDir;
 
     use angos_oci::Digest;
@@ -739,7 +766,7 @@ mod tests {
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         jobs::store::{ClaimMode, FailOutcome},
         registry::{
-            metadata_store::{LinkKind, LinkOperation, MetadataStore},
+            metadata_store::{LinkKind, LinkOperation, MetadataStore, ReferencePolicy},
             test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend, put_blob_direct},
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
@@ -1068,6 +1095,77 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// CI that re-pushes a tag between the retention snapshot and the delete
+    /// must not lose the image it just pushed, and a tag still pointing where
+    /// it was judged must still go.
+    #[tokio::test]
+    async fn executor_deletes_a_tag_only_while_it_points_where_it_was_judged() {
+        let case = FSRegistryTestCase::new();
+        let blob_store = case.blob_store();
+        let metadata_store = case.metadata_store();
+        let namespace = Namespace::new("test-repo/ci").unwrap();
+        let tag = Tag::new("latest").unwrap();
+
+        let judged = put_blob_direct(metadata_store.object_store(), b"what retention judged").await;
+        let repushed = put_blob_direct(metadata_store.object_store(), b"what CI just pushed").await;
+        // Both in the past, so the delete's own tombstone outranks them.
+        let pushed_at = Utc::now() - TimeDelta::seconds(10);
+        for (digest, at) in [
+            (&judged, pushed_at),
+            (&repushed, pushed_at + TimeDelta::seconds(1)),
+        ] {
+            metadata_store
+                .store_manifest(
+                    &namespace,
+                    &[LinkOperation::create(
+                        LinkKind::Tag(tag.clone()),
+                        digest.clone(),
+                    )],
+                    Some(at),
+                    ReferencePolicy::Trusted,
+                )
+                .await
+                .unwrap();
+        }
+
+        let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
+        executor
+            .apply(Action::DeleteTag {
+                namespace: namespace.clone(),
+                tag: tag.clone(),
+                target: Some(judged),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+                .await
+                .unwrap()
+                .target,
+            repushed,
+            "a tag re-pointed since it was judged must survive"
+        );
+
+        executor
+            .apply(Action::DeleteTag {
+                namespace: namespace.clone(),
+                tag: tag.clone(),
+                target: Some(repushed),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag))
+                .await
+                .is_err(),
+            "a tag still pointing where it was judged must be deleted"
+        );
     }
 
     /// Every producer of this action treats a revision as orphaned the moment

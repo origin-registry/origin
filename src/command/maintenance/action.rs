@@ -70,6 +70,11 @@ pub enum Action {
     DeleteTag {
         namespace: Namespace,
         tag: Tag,
+        /// The digest the tag pointed at when it was judged. The executor
+        /// re-reads the tag and skips when it points elsewhere by then, so a
+        /// re-push racing the sweep is not deleted. `None` deletes whatever the
+        /// tag points at, which is what clearing an orphan namespace means.
+        target: Option<Digest>,
     },
     /// Remove by prefix the upload subtree of a namespace whose raw on-disk
     /// name fails `Namespace` validation.
@@ -206,9 +211,14 @@ impl fmt::Display for Action {
                     "recreate invalid link from namespace '{namespace}': '{link}' -> '{target}'"
                 )
             }
-            Action::DeleteTag { namespace, tag } => {
-                write!(f, "delete tag '{namespace}:{tag}' (policy)")
-            }
+            Action::DeleteTag {
+                namespace,
+                tag,
+                target,
+            } => match target {
+                Some(target) => write!(f, "delete tag '{namespace}:{tag}' -> '{target}' (policy)"),
+                None => write!(f, "delete tag '{namespace}:{tag}' (policy)"),
+            },
             Action::DeleteInvalidUploadNamespace { name } => {
                 write!(f, "delete invalid upload namespace directory '{name}'")
             }

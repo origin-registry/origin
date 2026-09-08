@@ -323,7 +323,7 @@ impl RetentionChecker {
         tags: &'a [TagWithMetadata],
         last_pushed: &[String],
         last_pulled: &[String],
-    ) -> Vec<&'a Tag> {
+    ) -> Vec<&'a TagWithMetadata> {
         tags.iter()
             .filter(
                 |tag| match self.should_retain_tag(namespace, tag, last_pushed, last_pulled) {
@@ -337,7 +337,6 @@ impl RetentionChecker {
                     }
                 },
             )
-            .map(|tag| &tag.name)
             .collect()
     }
 
@@ -346,16 +345,22 @@ impl RetentionChecker {
     async fn emit_delete_tags(
         &self,
         namespace: &Namespace,
-        tags_to_delete: &[&Tag],
+        tags_to_delete: &[&TagWithMetadata],
         sink: &dyn ActionSink,
     ) -> Result<(), Error> {
         for tag in tags_to_delete {
             let action = Action::DeleteTag {
                 namespace: namespace.clone(),
-                tag: (*tag).clone(),
+                tag: tag.name.clone(),
+                // What the tag resolved to when it was judged: a re-push
+                // between here and the delete must not be swept away.
+                target: Some(tag.metadata.target.clone()),
             };
             if let Err(e) = sink.apply(action).await {
-                error!("Failed to delete tag '{namespace}:{tag}' for retention: {e}");
+                error!(
+                    "Failed to delete tag '{namespace}:{}' for retention: {e}",
+                    tag.name
+                );
             }
         }
         Ok(())
