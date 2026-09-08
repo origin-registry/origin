@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An upstream token endpoint answering with an absurd `expires_in` no longer panics the task that caches the token, which on `angos worker` cost a worker slot per such response.
 - `angos prune` leaves a manifest revision alone while its record is younger than `gc_grace_secs`, so retention and orphan-namespace clearing no longer delete the platform manifests of a multi-arch push before the index that names them lands.
 - A retention tag deletion re-reads the tag and skips it when it points somewhere else by then, so a re-push landing between the policy snapshot and the delete is no longer swept away.
+- The in-flight window that shields a push from the grant sweep is measured on the ownership grant rather than on the bytes it names, so a cross-repository mount of an old blob is no longer revoked mid-push.
 
 ## 1.7.1
 

@@ -9,11 +9,17 @@ use tracing::{debug, error};
 use angos_oci::{Digest, Namespace, Tag};
 
 use crate::{
-    command::maintenance::{Error, action::Action, check::NamespaceChecker, executor::ActionSink},
+    command::maintenance::{
+        Error,
+        action::Action,
+        check::NamespaceChecker,
+        executor::{ActionSink, object_younger_than_grace},
+    },
     policy::{ManifestImage, RetentionPolicy},
     registry::{
         Error as RegistryError, Repository,
         blob_store::BlobStore,
+        keys::DigestKeys,
         manifest::{link_plan, read_manifest},
         metadata_store::{BlobIndex, LinkKind, LinkMetadata, MetadataStore},
         repository_resolver::RepositoryResolver,
@@ -137,9 +143,9 @@ fn decide_orphan_fate(
 /// so an unconfigured registry retains the grant like an orphan manifest.
 ///
 /// `in_flight_window` guards the push race, not the decision: a push grants
-/// ownership before it links the manifest, so bytes younger than the window
-/// are never considered. The executor re-checks the references and the own
-/// key's age at apply time before revoking.
+/// ownership before it links the manifest, so neither bytes nor a grant
+/// younger than the window is considered. The executor re-checks the
+/// references and the own key's age at apply time before revoking.
 pub async fn sweep_orphan_grants(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
@@ -155,6 +161,7 @@ pub async fn sweep_orphan_grants(
         resolver,
         global_policy,
         in_flight_window,
+        in_flight_window_secs: u64::try_from(in_flight_window.num_seconds()).unwrap_or(0),
         now: Utc::now(),
         sink,
     };
@@ -177,13 +184,17 @@ struct GrantSweep<'a> {
     resolver: &'a Arc<RepositoryResolver>,
     global_policy: Option<&'a RetentionPolicy>,
     in_flight_window: Duration,
+    /// [`Self::in_flight_window`] in seconds, for the key-age helper.
+    in_flight_window_secs: u64,
     now: DateTime<Utc>,
     sink: &'a dyn ActionSink,
 }
 
 async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<(), Error> {
-    // In-flight guard on the bytes' mtime; with no mtime or no bytes, leave
-    // the blob to scrub's orphan GC.
+    // With no mtime or no bytes, leave the blob to scrub's orphan GC. The
+    // mtime spares a whole freshly uploaded blob, and dates the retention
+    // subject below; a grant's own in-flight guard is per namespace, since a
+    // mount writes a fresh ownership key over bytes of any age.
     let last_modified = match ctx.blob_store.last_modified(blob).await {
         Ok(Some(ts)) => ts,
         Ok(None) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => return Ok(()),
@@ -217,6 +228,20 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
         // A tracked link means a manifest references the blob, so the grant is
         // live; only a grant-only namespace is a retention subject.
         if !links.contains(&grant) || links.iter().any(LinkKind::is_tracked) {
+            continue;
+        }
+        // A cross-repository mount grants ownership of bytes that may be weeks
+        // old, so the window that shields an in-flight push is measured on the
+        // grant, not on what it points at. A gone key is already revoked.
+        if object_younger_than_grace(
+            ctx.metadata_store.object_store().as_ref(),
+            &blob.blob_ref_own_path(&namespace),
+            ctx.in_flight_window_secs,
+        )
+        .await
+        .map_err(RegistryError::from)?
+        .unwrap_or(true)
+        {
             continue;
         }
         let global = check_global_policy(ctx.global_policy, &subject, &[], &[])?;
@@ -600,9 +625,10 @@ impl RetentionChecker {
 mod tests {
     use std::{
         collections::HashMap,
+        fs::{File, FileTimes},
         str::FromStr,
         sync::atomic::{AtomicUsize, Ordering},
-        time::Duration as StdDuration,
+        time::{Duration as StdDuration, SystemTime},
     };
 
     use chrono::{TimeZone, Utc};
@@ -1588,6 +1614,47 @@ mod tests {
             RepositoryResolver::new(test_utils::create_test_repositories())
                 .expect("test repositories must not overlap"),
         )
+    }
+
+    /// A cross-repository mount grants ownership of bytes that may be weeks
+    /// old, so the window that shields an in-flight push has to be measured on
+    /// the grant. Measured on the bytes it never fires, and a deleting policy
+    /// revokes the mount mid-push.
+    #[tokio::test]
+    async fn a_fresh_grant_over_old_bytes_stays_inside_the_in_flight_window() {
+        let test_case = FSRegistryTestCase::new();
+        let namespace = Namespace::new("test-repo/mounted").unwrap();
+        let metadata_store = test_case.metadata_store();
+        let blob = seed_grant_only_blob(&test_case, &namespace).await;
+
+        // Age the bytes a week; the grant naming them was written just now.
+        let week_ago = SystemTime::now() - StdDuration::from_hours(24 * 7);
+        File::options()
+            .write(true)
+            .open(test_case.temp_dir().path().join(blob.blob_path()))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(week_ago))
+            .unwrap();
+
+        sweep_orphan_grants(
+            &test_case.blob_store(),
+            &metadata_store,
+            &grant_resolver(),
+            Some(&keep_nothing_policy()),
+            chrono::Duration::days(1),
+            &Executor::new_for_test(test_case.blob_store(), metadata_store.clone()),
+            4,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            metadata_store
+                .read_blob_index_namespace(&namespace, &blob)
+                .await
+                .is_ok(),
+            "a grant written inside the in-flight window must survive, however old its bytes"
+        );
     }
 
     #[tokio::test]
