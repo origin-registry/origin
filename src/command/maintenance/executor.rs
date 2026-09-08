@@ -429,11 +429,29 @@ impl Executor {
 
     /// Retention orphan-manifest deletion through the registry's standard
     /// delete path, which also reclaims the manifest's bytes once unreferenced.
+    /// Age-gated like [`Self::delete_orphan_blob`]: every producer of this
+    /// action classifies a revision as orphaned the moment its record exists,
+    /// which is before the tag or index that will reference it lands.
     async fn delete_orphan_manifest(
         &self,
         namespace: Namespace,
         digest: Digest,
     ) -> Result<(), Error> {
+        // A multi-arch push writes its platform manifests by digest before the
+        // index that names them, and a single push has the same window between
+        // its record and its tag, so a fresh revision is still being pushed.
+        if self
+            .key_younger_than_grace(
+                self.metadata_store.object_store().as_ref(),
+                &namespace.revision_record_path(&digest),
+            )
+            .await?
+            .unwrap_or(false)
+        {
+            info!("skipping orphan manifest deletion: '{digest}' is younger than the grace period");
+            return Ok(());
+        }
+
         self.retention_registry()?
             .delete_manifest(
                 Some(EventActor::internal(RETENTION_ACTOR)),
@@ -721,8 +739,8 @@ mod tests {
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         jobs::store::{ClaimMode, FailOutcome},
         registry::{
-            metadata_store::{LinkKind, LinkOperation},
-            test_utils::{for_each_backend, put_blob_direct},
+            metadata_store::{LinkKind, LinkOperation, MetadataStore},
+            test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend, put_blob_direct},
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
@@ -1050,6 +1068,56 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// Every producer of this action treats a revision as orphaned the moment
+    /// its record exists, which is before the index or tag that will reference
+    /// it lands. A multi-arch push writes its platform manifests first, so
+    /// without the gate retention deletes them mid-push.
+    #[tokio::test]
+    async fn executor_keeps_an_orphan_manifest_younger_than_the_grace() {
+        let case = FSRegistryTestCase::new();
+        let blob_store = case.blob_store();
+        let metadata_store = case.metadata_store();
+        let namespace = Namespace::new("test-repo/mid-push").unwrap();
+
+        let content = b"a platform manifest whose index has not landed yet";
+        let digest = put_blob_direct(metadata_store.object_store(), content).await;
+        metadata_store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest.clone(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        // The same store, read through a grace period the record cannot have
+        // outlived.
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let executor = Executor::new_for_test(blob_store.clone(), graced);
+
+        executor
+            .apply(Action::DeleteOrphanManifest {
+                namespace: namespace.clone(),
+                digest: digest.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(digest.clone()))
+                .await
+                .is_ok(),
+            "a revision younger than the grace is still being pushed and must survive"
+        );
     }
 
     #[tokio::test]

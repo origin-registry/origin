@@ -70,7 +70,7 @@ Prune first enforces retention policies (see [Configure Retention Policies](conf
 | Orphan namespaces | Clears revisions, tags, in-flight uploads, and blob grants of every namespace not owned by any configured repository (always on; see below) |
 | Orphan jobs | Deletes queued replication/cache jobs whose downstream or repository is not configured (always on) |
 
-These need an age threshold because a structural check cannot distinguish an in-flight push (blob uploaded, manifest seconds away) from an abandoned one; the `-u` window is exactly that upload-lifecycle age. The `-u` window must exceed the longest push you expect, since a deleting retention policy revokes grant-only blobs older than it. Run prune against the same configuration file the servers use.
+These need an age threshold because a structural check cannot distinguish an in-flight push (blob uploaded, manifest seconds away) from an abandoned one; the `-u` window is exactly that upload-lifecycle age. A revision is left alone while its record is younger than `gc_grace_secs`, for the same reason: a multi-arch push writes its platform manifests by digest before the index that names them, so a manifest with no tag may simply be mid-push. The `-u` window must exceed the longest push you expect, since a deleting retention policy revokes grant-only blobs older than it. Run prune against the same configuration file the servers use.
 
 | Option | Short | Description |
 |---|---|---|
