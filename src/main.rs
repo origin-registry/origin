@@ -257,7 +257,7 @@ async fn run_server(config_paths: &[String], config: Configuration) -> Result<()
     tokio::select! {
         result = server.run() => result,
         () = shutdown_signal() => {
-            info!("Shutdown signal received, draining in-flight webhook deliveries");
+            info!("Shutdown signal received, draining in-flight requests");
             server
                 .shutdown_with_timeout(Duration::from_secs(config.global.shutdown_drain_secs))
                 .await;

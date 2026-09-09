@@ -37,10 +37,10 @@ impl ServiceListener {
         }
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self, grace: Duration) {
         match self {
-            Self::Insecure(listener) => listener.shutdown().await,
-            Self::Secure(listener) => listener.shutdown().await,
+            Self::Insecure(listener) => listener.shutdown(grace).await,
+            Self::Secure(listener) => listener.shutdown(grace).await,
         }
     }
 }
@@ -186,7 +186,9 @@ impl Command {
     }
 
     pub async fn shutdown_with_timeout(&self, grace: Duration) {
-        self.listener.shutdown().await;
+        // Stops accepting first, so the in-flight exchanges drain against a
+        // server nothing new is arriving at.
+        self.listener.shutdown(grace).await;
         // Cancellation races only the claim, so this drains the job in flight
         // rather than killing it at process exit.
         self.in_process_loops

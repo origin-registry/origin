@@ -14,6 +14,7 @@ use tokio::{
     pin,
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -39,6 +40,9 @@ use crate::{
 type DispatchFuture =
     Pin<Box<dyn Future<Output = Result<Response<ResponseBody>, ServerError>> + Send + 'static>>;
 
+/// Serve one connection until it closes, its query timeout fires, or the
+/// server shuts down. The last two both let the exchange in flight finish,
+/// they only stop the keepalive from taking another request.
 pub async fn serve_request<S>(
     stream: TokioIo<S>,
     context: Arc<ServerContext>,
@@ -46,6 +50,7 @@ pub async fn serve_request<S>(
     timeouts: Arc<RequestTimeouts>,
     remote_address: SocketAddr,
     scheme: RequestScheme,
+    shutdown: CancellationToken,
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
@@ -65,10 +70,11 @@ pub async fn serve_request<S>(
     let query_timeout = timeouts.query;
     let grace_period = timeouts.grace;
 
-    // Phase 1: serve until the connection finishes or its query timeout (a wall-clock
-    // deadline from connection start, not an activity-reset watchdog) fires. On
-    // timeout, signal a graceful shutdown so the connection stops accepting new
-    // requests on the keepalive but still drains the in-flight one.
+    // Phase 1: serve until the connection finishes, its query timeout (a
+    // wall-clock deadline from connection start, not an activity-reset
+    // watchdog) fires, or the server shuts down. Either signal starts a
+    // graceful shutdown, so the connection stops taking new requests on the
+    // keepalive but still drains the in-flight one.
     tokio::select! {
         res = conn.as_mut() => {
             match res {
@@ -79,6 +85,10 @@ pub async fn serve_request<S>(
         }
         () = sleep(query_timeout) => {
             debug!("query timeout reached, signalling graceful shutdown");
+            conn.as_mut().graceful_shutdown();
+        }
+        () = shutdown.cancelled() => {
+            debug!("server shutting down, letting the connection finish its exchange");
             conn.as_mut().graceful_shutdown();
         }
     }

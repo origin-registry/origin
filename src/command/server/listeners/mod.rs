@@ -7,8 +7,10 @@ use hyper_util::rt::TokioIo;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
+    select,
     time::{sleep, timeout},
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -45,6 +47,27 @@ impl RequestTimeouts {
     }
 }
 
+/// The connection tasks a listener has spawned, and the token asking them to
+/// finish. Spawns are tracked rather than detached so shutdown can wait for
+/// the exchanges in flight instead of cutting them with the runtime.
+#[derive(Clone, Default)]
+pub struct Connections {
+    shutdown: CancellationToken,
+    tasks: TaskTracker,
+}
+
+impl Connections {
+    /// Stop accepting, ask every connection to finish its current exchange,
+    /// and wait up to `grace` for them.
+    pub async fn drain(&self, grace: Duration) {
+        self.shutdown.cancel();
+        self.tasks.close();
+        if timeout(grace, self.tasks.wait()).await.is_err() {
+            warn!("Connections did not finish within the shutdown grace period");
+        }
+    }
+}
+
 /// Paced by consecutive accept failures so a listener that cannot hand out
 /// descriptors does not spin the loop at full speed until it recovers.
 const ACCEPT_BACKOFF: Backoff =
@@ -74,6 +97,7 @@ pub struct Listener<C: Connector> {
     connector: Arc<C>,
     context: ArcSwap<ServerContext>,
     timeouts: ArcSwap<RequestTimeouts>,
+    connections: Connections,
 }
 
 impl<C: Connector + 'static> Listener<C> {
@@ -85,6 +109,7 @@ impl<C: Connector + 'static> Listener<C> {
             connector: Arc::new(connector),
             context: ArcSwap::from_pointee(context),
             timeouts: ArcSwap::from_pointee(RequestTimeouts::from_config(base)),
+            connections: Connections::default(),
         }
     }
 
@@ -99,13 +124,23 @@ impl<C: Connector + 'static> Listener<C> {
             .store(Arc::new(RequestTimeouts::from_config(base)));
     }
 
-    pub async fn shutdown(&self) {
+    /// Stop serving: no new connections, every in-flight exchange gets up to
+    /// `grace` to finish, then the webhook deliveries drain as before.
+    pub async fn shutdown(&self, grace: Duration) {
+        self.connections.drain(grace).await;
         self.context.load().shutdown().await;
     }
 
     pub async fn serve(&self) -> Result<(), Error> {
         let listener = build_listener(self.binding_address).await?;
-        accept_loop(listener, &self.connector, &self.context, &self.timeouts).await
+        accept_loop(
+            listener,
+            &self.connector,
+            &self.context,
+            &self.timeouts,
+            &self.connections,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -124,6 +159,7 @@ pub async fn accept_loop<C: Connector + 'static>(
     connector: &Arc<C>,
     context: &ArcSwap<ServerContext>,
     timeouts: &ArcSwap<RequestTimeouts>,
+    connections: &Connections,
 ) -> Result<(), Error> {
     let binding_address = match listener.local_addr() {
         Ok(address) => address,
@@ -138,7 +174,14 @@ pub async fn accept_loop<C: Connector + 'static>(
 
     loop {
         debug!("Waiting for incoming connection");
-        let (tcp, remote_address) = match listener.accept().await {
+        let accepted = select! {
+            () = connections.shutdown.cancelled() => {
+                info!("Shutting down, no longer accepting on {binding_address}");
+                return Ok(());
+            }
+            accepted = listener.accept() => accepted,
+        };
+        let (tcp, remote_address) = match accepted {
             Ok(accepted) => {
                 consecutive_failures = 0;
                 accepted
@@ -159,10 +202,12 @@ pub async fn accept_loop<C: Connector + 'static>(
         let connector = Arc::clone(connector);
         let context = Arc::clone(&context.load());
         let timeouts = Arc::clone(&timeouts.load());
+        let shutdown = connections.shutdown.clone();
 
         // The handshake runs on its own task: awaiting it here would let one
-        // stalled client hold up every other connection on this listener.
-        tokio::spawn(async move {
+        // stalled client hold up every other connection on this listener. The
+        // task is tracked, so shutdown waits for its exchange.
+        connections.tasks.spawn(async move {
             let handshake =
                 match timeout(timeouts.handshake, connector.handshake(tcp, remote_address)).await {
                     Ok(Some(handshake)) => handshake,
@@ -181,6 +226,7 @@ pub async fn accept_loop<C: Connector + 'static>(
                 timeouts,
                 remote_address,
                 connector.scheme(),
+                shutdown,
             )
             .await;
         });
@@ -199,7 +245,10 @@ async fn build_listener(binding_address: SocketAddr) -> Result<TcpListener, Erro
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
 
     use super::*;
     use crate::command::server::server_context::tests::create_test_server_context;
@@ -263,6 +312,59 @@ mod tests {
         (listener, address)
     }
 
+    /// The regression: connection tasks were detached spawns, so a shutdown
+    /// returned at once and the runtime cut every exchange in flight. Shutdown
+    /// must wait for them instead, up to its grace.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_connections_it_spawned() {
+        let (listener, address) = bound_listener().await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let connector = Arc::new(StalledConnector {
+            started: Arc::clone(&started),
+        });
+        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let timeouts =
+            ArcSwap::from_pointee(RequestTimeouts::from_config(&ListenerBaseConfig::default()));
+        let connections = Connections::default();
+
+        let served = connections.clone();
+        let loop_handle = tokio::spawn(async move {
+            accept_loop(listener, &connector, &context, &timeouts, &served).await
+        });
+
+        let _client = TcpStream::connect(address).await.expect("connect");
+        for _ in 0..100 {
+            if started.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "the connection must start"
+        );
+
+        // The stalled handshake never returns, so the whole grace is spent: an
+        // untracked spawn would leave nothing to wait for and return at once.
+        let grace = Duration::from_millis(300);
+        let waited = Instant::now();
+        connections.drain(grace).await;
+
+        assert!(
+            waited.elapsed() >= grace,
+            "shutdown must wait out the grace for a connection still exchanging, waited {:?}",
+            waited.elapsed()
+        );
+        assert!(
+            loop_handle
+                .await
+                .expect("the accept loop must not panic")
+                .is_ok(),
+            "a cancelled accept loop stops accepting rather than failing"
+        );
+    }
+
     /// The regression: awaiting the handshake in the accept loop let one
     /// stalled client hold up every connection behind it.
     #[tokio::test]
@@ -276,10 +378,16 @@ mod tests {
         let timeouts =
             ArcSwap::from_pointee(RequestTimeouts::from_config(&ListenerBaseConfig::default()));
 
-        let loop_handle =
-            tokio::spawn(
-                async move { accept_loop(listener, &connector, &context, &timeouts).await },
-            );
+        let loop_handle = tokio::spawn(async move {
+            accept_loop(
+                listener,
+                &connector,
+                &context,
+                &timeouts,
+                &Connections::default(),
+            )
+            .await
+        });
 
         // Both clients connect; neither handshake will ever finish.
         let _first = TcpStream::connect(address).await.expect("first connect");
@@ -316,10 +424,16 @@ mod tests {
             grace: Duration::from_secs(1),
         });
 
-        let loop_handle =
-            tokio::spawn(
-                async move { accept_loop(listener, &connector, &context, &timeouts).await },
-            );
+        let loop_handle = tokio::spawn(async move {
+            accept_loop(
+                listener,
+                &connector,
+                &context,
+                &timeouts,
+                &Connections::default(),
+            )
+            .await
+        });
 
         let client = TcpStream::connect(address).await.expect("connect");
         for _ in 0..100 {
