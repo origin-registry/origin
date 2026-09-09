@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A batch-delete error carrying no message fails the delete instead of reading as success, so `delete_prefix` no longer reports a prefix as emptied when it is not.
 - `ListMultipartUploads` is scoped to the configured `key_prefix`, so upload cleanup on a shared bucket no longer sees another tenant's in-flight uploads.
 - A 409 `ConditionalRequestConflict` from S3 is retried as the protocol defines rather than read as "the object already exists", where a scrub demotion could delete a tag-history entry it had never copied.
+- A refused S3 request (a denied action, a malformed request) no longer counts as a circuit-breaker failure, so one denied IAM action can no longer open the breaker and fail every other operation.
+- An S3 response carrying no `content-length` is an error rather than an empty object, which a `HEAD` reported as a zero-byte blob and a `GET` served truncated.
+- `circuit_breaker_threshold = 0` and zero operation timeouts are rejected at startup, where they left the client answering nothing at all.
+- The circuit breaker measures its cooldown on a monotonic clock, so a wall-clock step no longer stretches or skips it.
 
 ## 1.7.1
 

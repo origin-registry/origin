@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 use tracing::warn;
@@ -30,7 +30,11 @@ impl std::error::Error for CircuitBreakerError {}
 #[derive(Clone, Debug)]
 pub struct CircuitBreaker {
     consecutive_failures: Arc<AtomicU32>,
-    opened_at_epoch_secs: Arc<AtomicU64>,
+    /// Seconds since [`Self::start`] at which the breaker last opened. Measured
+    /// against a monotonic baseline rather than the wall clock, which a step
+    /// backwards would stretch the cooldown by and a step forwards would skip.
+    opened_at_secs: Arc<AtomicU64>,
+    start: Instant,
     threshold: u32,
     cooldown_secs: u64,
 }
@@ -41,7 +45,8 @@ impl CircuitBreaker {
     pub fn new(threshold: u32, cooldown_secs: u64) -> Self {
         Self {
             consecutive_failures: Arc::new(AtomicU32::new(0)),
-            opened_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+            opened_at_secs: Arc::new(AtomicU64::new(0)),
+            start: Instant::now(),
             threshold,
             cooldown_secs,
         }
@@ -61,11 +66,8 @@ impl CircuitBreaker {
         if failures < self.threshold {
             return Ok(());
         }
-        let opened_at = self.opened_at_epoch_secs.load(Ordering::Acquire);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let opened_at = self.opened_at_secs.load(Ordering::Acquire);
+        let now = self.start.elapsed().as_secs();
         let rejected = || CircuitBreakerError {
             failures,
             cooldown_secs: self.cooldown_secs,
@@ -81,7 +83,7 @@ impl CircuitBreaker {
         // reports a result is superseded by the next caller after another
         // cooldown, so the breaker cannot wedge half-open.
         if self
-            .opened_at_epoch_secs
+            .opened_at_secs
             .compare_exchange(opened_at, now, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
@@ -93,21 +95,18 @@ impl CircuitBreaker {
 
     pub fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Release);
-        self.opened_at_epoch_secs.store(0, Ordering::Release);
+        self.opened_at_secs.store(0, Ordering::Release);
     }
 
     pub fn record_failure(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = self.start.elapsed().as_secs();
         // Store `opened_at` BEFORE publishing the new failure count. Any concurrent
         // `check()` that reads `consecutive_failures >= THRESHOLD` via Acquire is then
         // guaranteed (release-acquire pair via the fetch_add) to read at least this
         // `opened_at` value, eliminating the window where the count appears open but
         // `opened_at` is still zero. Writing on every failure also re-arms the cooldown
         // when a request slipped through after the previous cooldown expired and failed.
-        self.opened_at_epoch_secs.store(now, Ordering::Release);
+        self.opened_at_secs.store(now, Ordering::Release);
         let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
         if prev + 1 == self.threshold {
             warn!(
@@ -122,22 +121,31 @@ impl CircuitBreaker {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{thread, time::Duration};
 
     use super::*;
 
     const THRESHOLD: u32 = 5;
     const COOLDOWN_SECS: u64 = 10;
 
+    /// The baseline sits far enough in the past that a test can rewind
+    /// `opened_at` by a whole cooldown to expire it, which a breaker built at
+    /// `Instant::now()` has no room for.
     fn breaker() -> CircuitBreaker {
-        CircuitBreaker::new(THRESHOLD, COOLDOWN_SECS)
+        let elapsed = Duration::from_secs(COOLDOWN_SECS * 10);
+        CircuitBreaker {
+            start: Instant::now()
+                .checked_sub(elapsed)
+                .unwrap_or_else(Instant::now),
+            ..CircuitBreaker::new(THRESHOLD, COOLDOWN_SECS)
+        }
     }
 
     #[test]
     fn new_breaker_starts_closed() {
         let cb = breaker();
         assert_eq!(cb.consecutive_failures.load(Ordering::Acquire), 0);
-        assert_eq!(cb.opened_at_epoch_secs.load(Ordering::Acquire), 0);
+        assert_eq!(cb.opened_at_secs.load(Ordering::Acquire), 0);
         assert!(cb.check().is_ok());
     }
 
@@ -206,8 +214,8 @@ mod tests {
             cb.record_failure();
         }
         // Simulate cooldown elapse by rewinding `opened_at`.
-        cb.opened_at_epoch_secs.store(
-            cb.opened_at_epoch_secs
+        cb.opened_at_secs.store(
+            cb.opened_at_secs
                 .load(Ordering::Acquire)
                 .saturating_sub(COOLDOWN_SECS + 1),
             Ordering::Release,
@@ -222,9 +230,9 @@ mod tests {
             "record_success must zero consecutive_failures"
         );
         assert_eq!(
-            cb.opened_at_epoch_secs.load(Ordering::Acquire),
+            cb.opened_at_secs.load(Ordering::Acquire),
             0,
-            "record_success must zero opened_at_epoch_secs"
+            "record_success must zero opened_at_secs"
         );
         assert!(
             cb.check().is_ok(),
@@ -252,7 +260,7 @@ mod tests {
         cb.record_success();
 
         assert_eq!(cb.consecutive_failures.load(Ordering::Acquire), 0);
-        assert_eq!(cb.opened_at_epoch_secs.load(Ordering::Acquire), 0);
+        assert_eq!(cb.opened_at_secs.load(Ordering::Acquire), 0);
         assert!(cb.check().is_ok());
     }
 
@@ -262,10 +270,10 @@ mod tests {
         for _ in 0..THRESHOLD {
             cb.record_failure();
         }
-        let initial_opened_at = cb.opened_at_epoch_secs.load(Ordering::Acquire);
+        let initial_opened_at = cb.opened_at_secs.load(Ordering::Acquire);
 
         // Simulate cooldown elapse by rewinding `opened_at` past the cooldown window.
-        cb.opened_at_epoch_secs.store(
+        cb.opened_at_secs.store(
             initial_opened_at.saturating_sub(COOLDOWN_SECS + 1),
             Ordering::Release,
         );
@@ -277,7 +285,7 @@ mod tests {
         // A subsequent failure must re-arm `opened_at` to a fresh timestamp,
         // re-opening the breaker for another cooldown window.
         cb.record_failure();
-        let re_armed = cb.opened_at_epoch_secs.load(Ordering::Acquire);
+        let re_armed = cb.opened_at_secs.load(Ordering::Acquire);
         assert!(
             re_armed >= initial_opened_at,
             "post-cooldown failure must re-arm opened_at: was {initial_opened_at}, now {re_armed}"
@@ -310,7 +318,7 @@ mod tests {
                 let mut observations = Vec::new();
                 for _ in 0..1000 {
                     let failures = cb_checker.consecutive_failures.load(Ordering::Acquire);
-                    let opened_at = cb_checker.opened_at_epoch_secs.load(Ordering::Acquire);
+                    let opened_at = cb_checker.opened_at_secs.load(Ordering::Acquire);
                     observations.push((failures, opened_at));
                 }
                 observations
@@ -341,8 +349,8 @@ mod tests {
         for _ in 0..THRESHOLD {
             cb.record_failure();
         }
-        cb.opened_at_epoch_secs.store(
-            cb.opened_at_epoch_secs
+        cb.opened_at_secs.store(
+            cb.opened_at_secs
                 .load(Ordering::Acquire)
                 .saturating_sub(COOLDOWN_SECS + 1),
             Ordering::Release,
@@ -405,8 +413,8 @@ mod tests {
         );
 
         // Once the new cooldown elapses, a fresh probe is admitted.
-        cb.opened_at_epoch_secs.store(
-            cb.opened_at_epoch_secs
+        cb.opened_at_secs.store(
+            cb.opened_at_secs
                 .load(Ordering::Acquire)
                 .saturating_sub(COOLDOWN_SECS + 1),
             Ordering::Release,

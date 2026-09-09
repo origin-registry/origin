@@ -161,6 +161,16 @@ impl S3Error {
     /// is not this: S3 answers it while another conditional request is in
     /// flight and defines it as retry-worthy, so reading it as "already there"
     /// would let a copy-then-delete move delete a source it never copied.
+    /// Whether the backend refused the request in a way retrying cannot
+    /// change: a 4xx that is neither a missing key, a failed precondition, nor
+    /// one of the retryable throttle statuses.
+    pub fn is_client_refusal(&self) -> bool {
+        self.status.is_some_and(|status| status.is_client_error())
+            && !self.is_not_found()
+            && !self.is_conditional_conflict()
+            && !is_retryable_error(self)
+    }
+
     pub fn is_conditional_conflict(&self) -> bool {
         self.status == Some(StatusCode::PRECONDITION_FAILED)
             || matches!(self.code.as_deref(), Some("PreconditionFailed"))
@@ -736,8 +746,10 @@ pub fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 pub fn content_length(headers: &HeaderMap) -> Result<u64, S3Error> {
+    // Defaulting a missing header to zero would report a stored blob as empty
+    // and truncate the body served from it.
     header_string(headers, "content-length")
-        .unwrap_or_else(|| "0".to_string())
+        .ok_or_else(|| S3Error::configuration("S3 response carries no content-length"))?
         .parse::<u64>()
         .map_err(|e| S3Error::configuration(format!("invalid S3 content-length: {e}")))
 }
@@ -991,6 +1003,20 @@ async fn read_response_prefix(response: Response, limit: usize) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A response with no `Content-Length` must not read as an empty object:
+    /// a HEAD would report a stored blob as zero bytes and a GET would serve
+    /// it truncated.
+    #[test]
+    fn a_missing_content_length_is_an_error_not_a_zero_size() {
+        let error = content_length(&HeaderMap::new())
+            .expect_err("a response carrying no content-length must not read as empty");
+
+        assert!(
+            error.to_string().contains("no content-length"),
+            "got: {error}"
+        );
+    }
 
     /// The `Content-Length` a response declares is the endpoint's word, and
     /// pre-allocating it lets a broken or hostile one abort the process, since

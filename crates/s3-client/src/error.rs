@@ -8,6 +8,11 @@ pub enum Error {
     Io(String),
     NotFound(String),
     PreconditionFailed,
+    /// The backend answered with a refusal no retry can change: a denied
+    /// action, a malformed request, a rejected checksum. Separate from
+    /// [`Error::Io`] because the backend is healthy, so a run of these must
+    /// not open the circuit breaker.
+    Rejected(String),
 }
 
 impl fmt::Display for Error {
@@ -17,6 +22,7 @@ impl fmt::Display for Error {
             Error::Io(e) => write!(f, "IO error: {e}"),
             Error::NotFound(e) => write!(f, "Not found: {e}"),
             Error::PreconditionFailed => write!(f, "Precondition failed"),
+            Error::Rejected(e) => write!(f, "Rejected: {e}"),
         }
     }
 }

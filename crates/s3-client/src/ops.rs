@@ -160,13 +160,8 @@ impl Backend {
             })
             .await?;
 
-        let content_length = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("0")
-            .parse::<u64>()
-            .map_err(|e| Error::Io(format!("invalid S3 content-length: {e}")))?;
+        let content_length =
+            parse_content_length(response.headers()).map_err(|e| Error::Io(e.to_string()))?;
         let reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
 
         Ok(GetObjectResult {
@@ -868,12 +863,15 @@ impl Iterator for CopyPartRanges {
 }
 
 /// Map an S3 transport or protocol error to the typed [`Error`]: a 404 to
-/// `NotFound`, a conditional 412 to `PreconditionFailed`, anything else to `Io`.
+/// `NotFound`, a conditional 412 to `PreconditionFailed`, a definitive 4xx to
+/// `Rejected`, anything else to `Io`.
 fn classify_error(error: &S3Error) -> Error {
     if error.is_not_found() {
         Error::NotFound(error.to_string())
     } else if error.is_conditional_conflict() {
         Error::PreconditionFailed
+    } else if error.is_client_refusal() {
+        Error::Rejected(error.to_string())
     } else {
         Error::Io(error.to_string())
     }
@@ -1560,6 +1558,37 @@ mod tests {
             body.len(),
             5,
             "the declared length bounds what is collected"
+        );
+    }
+
+    /// A denied action is the backend answering, not the backend being down.
+    /// Counting a run of them as failures opens the breaker and takes every
+    /// other operation down with one misconfigured IAM policy.
+    #[tokio::test]
+    async fn repeated_denials_leave_the_breaker_closed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let config = BackendConfig {
+            max_attempts: 1,
+            ..test_config(server.uri())
+        };
+        let backend = Backend::new(&config).unwrap();
+
+        for _ in 0..(config.circuit_breaker_threshold * 2) {
+            let error = backend
+                .read("denied")
+                .await
+                .expect_err("a denied read must surface");
+            assert!(matches!(error, Error::Rejected(_)), "got {error:?}");
+        }
+
+        assert!(
+            backend.circuit_breaker.check().is_ok(),
+            "a denied action must leave the breaker closed"
         );
     }
 

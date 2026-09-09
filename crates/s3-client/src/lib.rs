@@ -66,6 +66,17 @@ impl Backend {
             ));
         }
 
+        if config.circuit_breaker_threshold == 0 {
+            return Err(Error::Configuration(
+                "Circuit breaker threshold must be at least 1".to_string(),
+            ));
+        }
+        if config.operation_timeout_secs == 0 || config.operation_attempt_timeout_secs == 0 {
+            return Err(Error::Configuration(
+                "Operation timeouts must be at least 1 second".to_string(),
+            ));
+        }
+
         let s3_client = client::S3Client::new(config)
             .map_err(|e| Error::Configuration(format!("failed to initialize S3 client: {e}")))?;
 
@@ -84,8 +95,10 @@ impl Backend {
     }
 
     /// Run `op` behind the circuit breaker: fail fast while the breaker is
-    /// open, otherwise execute it and feed the outcome back. `NotFound` and
-    /// `PreconditionFailed` count as success since the backend answered.
+    /// open, otherwise execute it and feed the outcome back. `NotFound`,
+    /// `PreconditionFailed` and `Rejected` count as success since the backend
+    /// answered; only a transport failure or a 5xx says it is unhealthy, so a
+    /// single denied action cannot cascade into an outage.
     ///
     /// # Errors
     /// Returns [`Error::Io`] when the circuit breaker has tripped on repeated
@@ -94,7 +107,7 @@ impl Backend {
         self.circuit_breaker.check()?;
         let result = op.await;
         match &result {
-            Ok(_) | Err(Error::PreconditionFailed | Error::NotFound(_)) => {
+            Ok(_) | Err(Error::PreconditionFailed | Error::NotFound(_) | Error::Rejected(_)) => {
                 self.circuit_breaker.record_success();
             }
             Err(_) => self.circuit_breaker.record_failure(),
@@ -144,6 +157,22 @@ mod tests {
     #[test]
     fn test_new_multipart_part_size_too_large() {
         let result = Backend::new(&test_config(|c| c.multipart_part_size = ByteSize::gib(6)));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    /// A zero threshold opens the breaker before the first failure, and a zero
+    /// timeout expires every request: both make the client answer nothing.
+    #[test]
+    fn test_new_rejects_a_zero_circuit_breaker_threshold() {
+        let result = Backend::new(&test_config(|c| c.circuit_breaker_threshold = 0));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    #[test]
+    fn test_new_rejects_zero_operation_timeouts() {
+        let result = Backend::new(&test_config(|c| c.operation_timeout_secs = 0));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+        let result = Backend::new(&test_config(|c| c.operation_attempt_timeout_secs = 0));
         assert!(matches!(result, Err(Error::Configuration(_))));
     }
 
