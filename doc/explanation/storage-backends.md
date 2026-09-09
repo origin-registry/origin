@@ -349,7 +349,7 @@ copy limits without proxying blob bytes through Angos.
 
 When using S3 for metadata, Angos includes several optimizations to reduce round-trips and improve scalability:
 
-**Link cache**: A read-through cache for link metadata (tags, layer links). Populated on both read and write, invalidated on delete. Configurable TTL (default 30 s, `link_cache_ttl = 0` to disable). Shares the same cache backend (in-memory or Redis) as authentication tokens.
+**Link cache**: A read-through cache for link metadata (tags, revisions, referrers). Populated on both read and write, and invalidated on delete by the instance that performed it, so the TTL is what bounds a stale entry elsewhere. Configurable TTL (default 30 s, `link_cache_ttl = 0` to disable), and it applies to every kind: nothing is pinned for longer. Shares the same cache backend (in-memory or Redis) as authentication tokens.
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 

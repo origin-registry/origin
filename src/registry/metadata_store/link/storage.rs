@@ -10,11 +10,6 @@ use crate::registry::{
     metadata_store::{LinkKind, LinkMetadata, MetadataStore},
 };
 
-/// Cache TTL for revision and referrer records, which never mutate: a year
-/// stands in for "no expiry" (deletes invalidate explicitly) while staying
-/// safe for the memory backend's deadline arithmetic.
-const IMMUTABLE_LINK_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
-
 impl MetadataStore {
     /// Read the stored [`LinkMetadata`] for `link` within `namespace`: a tag
     /// from its ordered entries, a revision or referrer from its record. Every
@@ -70,15 +65,14 @@ impl MetadataStore {
         if self.link_cache_ttl == 0 {
             return;
         }
-        // A revision or referrer record never mutates, so only an explicit
-        // delete invalidates it; a tag re-resolves after the TTL.
-        let ttl = match link {
-            LinkKind::Digest(_) | LinkKind::Referrer { .. } => IMMUTABLE_LINK_CACHE_TTL_SECS,
-            _ => self.link_cache_ttl,
-        };
+        // Every kind expires on the configured TTL. A revision or referrer
+        // record never mutates, but it does get deleted, and invalidation
+        // reaches only the process that performed the delete: pinning those
+        // records would keep every other replica answering for content that is
+        // gone. The record read they save is a single GET.
         if let Some(cache) = &self.cache {
             let key = Self::cache_key(namespace, link);
-            if let Err(err) = cache.store(&key, metadata, ttl).await {
+            if let Err(err) = cache.store(&key, metadata, self.link_cache_ttl).await {
                 warn!("Failed to store link metadata in cache for {namespace}/{link}: {err}");
             }
         }

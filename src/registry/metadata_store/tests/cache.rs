@@ -324,8 +324,12 @@ async fn test_cache_disabled_when_ttl_zero() {
     );
 }
 
+/// A revision record never mutates, but it does get deleted, and the
+/// invalidation reaches only the process that deleted it. Caching it past the
+/// TTL keeps every other replica answering `HEAD` and `GET` by digest for a
+/// manifest another replica, or `angos prune`, has removed.
 #[tokio::test]
-async fn a_revision_record_stays_cached_past_the_tag_ttl() {
+async fn a_revision_record_does_not_outlive_the_link_cache_ttl() {
     let mut config = test_config();
     config.link_cache_ttl = 1;
     let (backend, _cache) = test_backend_with_cache(&config);
@@ -347,18 +351,18 @@ async fn a_revision_record_stays_cached_past_the_tag_ttl() {
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // With the record gone only the cache can answer, and it must: an
-    // immutable record is cached without the tag TTL bound.
+    // The record is gone, as a delete on another replica or by prune leaves
+    // it here: with the cache expired, nothing may still answer for it.
     backend
         .object_store()
         .delete(&namespace.revision_record_path(&digest))
         .await
         .unwrap();
 
-    let meta = backend.read_link(&namespace, &link).await.unwrap();
-    assert_eq!(
-        meta.target, digest,
-        "an immutable record must outlive the tag TTL in cache"
+    let result = backend.read_link(&namespace, &link).await;
+    assert!(
+        matches!(result, Err(Error::NotFound)),
+        "a record cached past the TTL answers for content that is gone, got {result:?}"
     );
 }
 
