@@ -156,12 +156,14 @@ impl S3Error {
             || matches!(self.code.as_deref(), Some("NoSuchKey" | "NotFound"))
     }
 
+    /// Whether the precondition itself failed, which for `If-None-Match: *`
+    /// means the object is already there. A 409 `ConditionalRequestConflict`
+    /// is not this: S3 answers it while another conditional request is in
+    /// flight and defines it as retry-worthy, so reading it as "already there"
+    /// would let a copy-then-delete move delete a source it never copied.
     pub fn is_conditional_conflict(&self) -> bool {
         self.status == Some(StatusCode::PRECONDITION_FAILED)
-            || matches!(
-                self.code.as_deref(),
-                Some("PreconditionFailed" | "ConditionalRequestConflict")
-            )
+            || matches!(self.code.as_deref(), Some("PreconditionFailed"))
     }
 }
 
@@ -923,7 +925,10 @@ fn is_retryable_error(error: &S3Error) -> bool {
         || matches!(
             error.code.as_deref(),
             Some(
-                "InternalError"
+                // S3 answers this while another conditional request is in
+                // flight, and defines the remedy as retrying.
+                "ConditionalRequestConflict"
+                    | "InternalError"
                     | "RequestTimeout"
                     | "RequestTimeoutException"
                     | "SlowDown"

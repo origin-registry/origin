@@ -1563,6 +1563,30 @@ mod tests {
         );
     }
 
+    /// S3 answers 409 `ConditionalRequestConflict` while another conditional
+    /// request is in flight and defines it as retry-worthy. Reading it as "the
+    /// object is already there" makes a copy-then-delete move delete a source
+    /// it never copied.
+    #[tokio::test]
+    async fn a_conditional_conflict_is_retried_and_is_not_a_failed_precondition() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+
+        let error = fast_retry_backend(&server)
+            .put_object_if_not_exists("object", Bytes::from_static(b"body"))
+            .await
+            .expect_err("a conflict that outlasts the retries must surface");
+
+        assert!(
+            !matches!(error, Error::PreconditionFailed),
+            "a 409 does not mean the object exists, got {error:?}"
+        );
+        assert_retried(&server, "S3 defines a conditional conflict as retry-worthy").await;
+    }
+
     /// Replaying a lost `CreateMultipartUpload` leaves two open uploads for one
     /// key, and the keyless recovery then picks whichever it finds, which fails
     /// the push at completion.

@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A lost response to `CreateMultipartUpload` is no longer replayed, where the replay could leave two open uploads for one key and fail the push at completion.
 - A batch-delete error carrying no message fails the delete instead of reading as success, so `delete_prefix` no longer reports a prefix as emptied when it is not.
 - `ListMultipartUploads` is scoped to the configured `key_prefix`, so upload cleanup on a shared bucket no longer sees another tenant's in-flight uploads.
+- A 409 `ConditionalRequestConflict` from S3 is retried as the protocol defines rather than read as "the object already exists", where a scrub demotion could delete a tag-history entry it had never copied.
 
 ## 1.7.1
 
