@@ -364,10 +364,12 @@ impl Backend {
                 |response| xml::parse_delete_objects(&response.body).map_err(Error::Io),
             )
             .await?;
-        let errors: Vec<_> = parsed
+        // Every entry is a failed delete, message or not: dropping the ones
+        // without would tell `delete_prefix` the prefix is emptied.
+        let errors: Vec<String> = parsed
             .errors
             .into_iter()
-            .filter_map(|e| e.message)
+            .map(|e| e.message.unwrap_or_else(|| "unspecified".to_string()))
             .collect();
         if let Some(err) = aggregate_batch_delete_errors(&errors) {
             return Err(err);
@@ -514,6 +516,13 @@ impl Backend {
         self.send_guarded(
             S3Request {
                 query: vec![QueryParam::marker("uploads")],
+                // Replaying a lost response opens a second upload for the same
+                // key, and the keyless recovery then adopts whichever it finds
+                // first. The client's own retry re-derives one cleanly.
+                opts: SendOpts {
+                    non_idempotent: true,
+                    ..SendOpts::default()
+                },
                 ..S3Request::new(Method::POST, self.full_key(path))
             },
             |response| xml::parse_create_multipart_upload(&response.body).map_err(Error::Io),
@@ -669,10 +678,12 @@ impl Backend {
         key_marker: Option<&str>,
         upload_id_marker: Option<&str>,
     ) -> Result<(Vec<MultipartUpload>, Option<String>, Option<String>), Error> {
-        let mut query = vec![QueryParam::marker("uploads")];
-        if let Some(prefix) = prefix {
-            query.push(QueryParam::new("prefix", self.full_key(prefix)));
-        }
+        // Always scoped: an unprefixed listing returns the bucket's uploads,
+        // which on a shared bucket are another tenant's keys.
+        let mut query = vec![
+            QueryParam::marker("uploads"),
+            QueryParam::new("prefix", self.full_key(prefix.unwrap_or_default())),
+        ];
         if let Some(m) = key_marker {
             query.push(QueryParam::new("key-marker", m));
         }
@@ -900,7 +911,13 @@ fn ensure_trailing_slash(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use bytesize::ByteSize;
     use tokio::{
@@ -1544,6 +1561,85 @@ mod tests {
             5,
             "the declared length bounds what is collected"
         );
+    }
+
+    /// Replaying a lost `CreateMultipartUpload` leaves two open uploads for one
+    /// key, and the keyless recovery then picks whichever it finds, which fails
+    /// the push at completion.
+    #[tokio::test]
+    async fn create_multipart_upload_is_not_replayed_on_a_lost_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut request = vec![0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                // Close without answering: a transport error carrying no status.
+            }
+        });
+
+        let backend = Backend::new(&fast_retry_config(format!("http://{addr}"))).unwrap();
+        backend
+            .create_multipart_upload("object")
+            .await
+            .expect_err("a dropped connection must surface as an error");
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a lost response must not open a second upload for the same key"
+        );
+    }
+
+    /// A batch-delete error entry carrying no `<Message>` is still a failed
+    /// delete; reporting success tells `delete_prefix` the prefix is emptied.
+    #[tokio::test]
+    async fn a_batch_delete_error_without_a_message_still_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Contents><Key>prefix/doomed</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0" encoding="UTF-8"?><DeleteResult><Error><Key>prefix/doomed</Key><Code>InternalError</Code></Error></DeleteResult>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        mock_backend(&server)
+            .delete_prefix("prefix")
+            .await
+            .expect_err("an error entry without a message must fail the batch");
+    }
+
+    /// An unprefixed `ListMultipartUploads` returns the whole bucket, which on
+    /// a shared bucket is another tenant's in-flight uploads.
+    #[tokio::test]
+    async fn list_multipart_uploads_always_scopes_to_the_instance_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param("prefix", "tenant/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0" encoding="UTF-8"?><ListMultipartUploadsResult><IsTruncated>false</IsTruncated></ListMultipartUploadsResult>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let config = BackendConfig {
+            key_prefix: "tenant".to_string(),
+            ..test_config(server.uri())
+        };
+        Backend::new(&config)
+            .unwrap()
+            .list_multipart_uploads(None, None, None)
+            .await
+            .expect("the listing must carry the instance prefix");
     }
 
     /// A streamed part upload is paced by the pushing client, so it carries no

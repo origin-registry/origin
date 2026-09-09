@@ -28,6 +28,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The in-flight window that shields a push from the grant sweep is measured on the ownership grant rather than on the bytes it names, so a cross-repository mount of an old blob is no longer revoked mid-push.
 - A finished reclamation run expires its `v2/gc/` marker a few seconds after the delete instead of removing it at once, so a push whose reference landed after the run's last liveness check backs off rather than committing a manifest onto reclaimed bytes.
 - `sync_to_disk = true` now covers uploaded blob bytes, which were only flushed to the page cache, so a power loss can no longer leave a manifest pointing at a truncated blob.
+- A lost response to `CreateMultipartUpload` is no longer replayed, where the replay could leave two open uploads for one key and fail the push at completion.
+- A batch-delete error carrying no message fails the delete instead of reading as success, so `delete_prefix` no longer reports a prefix as emptied when it is not.
+- `ListMultipartUploads` is scoped to the configured `key_prefix`, so upload cleanup on a shared bucket no longer sees another tenant's in-flight uploads.
 
 ## 1.7.1
 
