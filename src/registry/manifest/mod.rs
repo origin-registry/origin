@@ -922,6 +922,42 @@ impl Registry {
     /// without a `source_ts` and for digest references, and the read bypasses
     /// the link cache and fails closed on errors other than `NotFound`, so
     /// stale state never lets an older write win.
+    /// Refuse a push that would move an immutable `tag` to different content.
+    ///
+    /// Immutability is about overwrites: a tag that does not exist yet has
+    /// nothing to protect, and a re-push of the digest it already holds
+    /// changes nothing. Like the last-writer-wins gate below, the read bypasses
+    /// the link cache and fails closed, so a stale entry can neither refuse a
+    /// push that no longer conflicts nor admit one that does.
+    async fn refuse_immutable_overwrite(
+        &self,
+        repository: Option<&Repository>,
+        namespace: &Namespace,
+        tag: &Tag,
+        incoming_digest: &Digest,
+    ) -> Result<(), Error> {
+        if !self.is_tag_immutable(repository, tag) {
+            return Ok(());
+        }
+
+        let held = match self
+            .metadata_store
+            .read_link_reference(namespace, &LinkKind::Tag(tag.clone()))
+            .await
+        {
+            Ok(metadata) => metadata.target,
+            Err(Error::NotFound) => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if held == *incoming_digest {
+            return Ok(());
+        }
+
+        Err(Error::Conflict(format!(
+            "Tag '{tag}' is immutable and cannot be overwritten"
+        )))
+    }
+
     async fn check_lww_not_superseded(
         &self,
         namespace: &Namespace,
@@ -1004,21 +1040,6 @@ impl Registry {
         } = request;
         let resolved_repository = self.resolver.resolve(&namespace);
 
-        // Refused before the body is read, so a push at an immutable tag does
-        // not pay for its own upload. A by-tag push writes the path tag; a
-        // by-digest push writes only the `?tag=` params.
-        let written_tags: &[Tag] = match &reference {
-            Reference::Tag(tag) => slice::from_ref(tag),
-            Reference::Digest(_) => &tags,
-        };
-        for tag in written_tags {
-            if self.is_tag_immutable(resolved_repository, tag) {
-                return Err(Error::Conflict(format!(
-                    "Tag '{tag}' is immutable and cannot be overwritten"
-                )));
-            }
-        }
-
         let created_tags: Vec<Tag> = match &reference {
             Reference::Digest(_) => tags,
             Reference::Tag(_) => Vec::new(),
@@ -1028,8 +1049,22 @@ impl Registry {
             read_limited_manifest_body(body_stream, self.max_manifest_size_bytes).await?;
 
         // Hashed up front: the intent events fired before the store carry the
-        // content digest, and the LWW tie-break compares it on equal timestamps.
+        // content digest, the LWW tie-break compares it on equal timestamps,
+        // and the immutability check below needs it to tell an overwrite from
+        // a re-push of what the tag already holds.
         let digest = Digest::sha256_of_bytes(&request_body);
+
+        // A by-tag push writes the path tag; a by-digest push writes only the
+        // `?tag=` params. Checked before the events, so a refused push emits
+        // nothing.
+        let written_tags: &[Tag] = match &reference {
+            Reference::Tag(tag) => slice::from_ref(tag),
+            Reference::Digest(_) => &created_tags,
+        };
+        for tag in written_tags {
+            self.refuse_immutable_overwrite(resolved_repository, &namespace, tag, &digest)
+                .await?;
+        }
 
         let repository = resolved_repository
             .map(|r| r.name.to_string())

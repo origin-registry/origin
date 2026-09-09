@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A configuration reload no longer cancels the asynchronous webhook deliveries the displaced dispatcher had in flight, retries included, which went unlogged.
 - A configuration the server refused is no longer cached by the file watcher, where a later certificate rotation would rebuild TLS from paths that never took effect.
 - A local tag push or delete is stamped one millisecond above the entry it supersedes, so a replica whose peer's clock runs ahead no longer answers `201` or `202` for a write that lands as the loser and leaves the tag unmoved.
+- `immutable_tags` refuses a push only when the tag already points at different content, so the first push of a protected tag and a re-push of what it holds now succeed, as its how-to always described.
 
 ## 1.7.1
 

@@ -4608,30 +4608,48 @@ async fn backdated_source_ts_loses_to_newer_local_tag() {
     );
 }
 
-/// A push at an immutable tag is refused by the registry, before the manifest
-/// body is read.
+/// A manifest and a rebuild of it, differing only by an annotation.
+const RELEASE: &[u8] =
+    br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+const REBUILD: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","annotations":{"build":"2"}}"#;
+
+/// Immutability protects a tag from being moved, not from being created: the
+/// how-to promises the first push succeeds and only a second with different
+/// content fails. Refusing the create would make a release tag impossible to
+/// publish with the flag on.
 #[tokio::test]
-async fn a_by_tag_push_at_an_immutable_tag_is_refused() {
+async fn an_immutable_tag_refuses_an_overwrite_but_not_its_first_push() {
     let test_case = FSRegistryTestCase::with_immutable_tags();
     let registry = test_case.registry();
     let namespace = Namespace::new("test-repo/app").unwrap();
+    let tag = Tag::new("v1.0.0").unwrap();
 
-    let result = registry
-        .accept_put_manifest(
-            None,
-            PutManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Tag(Tag::new("v1.0.0").unwrap()),
-                content_type: Some(MediaType::oci_manifest()),
-                tags: Vec::new(),
-                source_ts: None,
-            },
-            Cursor::new(b"{}".to_vec()),
-        )
-        .await;
+    let push = async |body: &'static [u8]| {
+        registry
+            .accept_put_manifest(
+                None,
+                PutManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(tag.clone()),
+                    content_type: Some(MediaType::oci_manifest()),
+                    tags: Vec::new(),
+                    source_ts: None,
+                },
+                Cursor::new(body.to_vec()),
+            )
+            .await
+    };
 
+    push(RELEASE)
+        .await
+        .expect("the first push of an immutable tag must succeed");
+    push(RELEASE)
+        .await
+        .expect("a re-push of what the tag already holds moves nothing");
+
+    let result = push(REBUILD).await;
     let Err(Error::Conflict(msg)) = result else {
-        panic!("an immutable tag must be refused, got: {result:?}");
+        panic!("moving an immutable tag must be refused, got: {result:?}");
     };
     assert!(
         msg.contains("v1.0.0") && msg.contains("immutable"),
@@ -4639,32 +4657,38 @@ async fn a_by_tag_push_at_an_immutable_tag_is_refused() {
     );
 }
 
-/// A by-digest push carrying an immutable tag in `?tag=` is refused too: the
-/// registry would otherwise create that tag over the protected one.
+/// The `?tag=` path carries the same rule: a by-digest push may create the
+/// immutable tag, and may not point it somewhere else afterwards.
 #[tokio::test]
-async fn a_by_digest_push_creating_an_immutable_tag_is_refused() {
+async fn a_by_digest_push_may_create_an_immutable_tag_but_not_move_it() {
     let test_case = FSRegistryTestCase::with_immutable_tags();
     let registry = test_case.registry();
     let namespace = Namespace::new("test-repo/app").unwrap();
-    let digest = Digest::sha256_of_bytes(b"{}");
 
-    let result = registry
-        .accept_put_manifest(
-            None,
-            PutManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Digest(digest),
-                content_type: Some(MediaType::oci_manifest()),
-                tags: vec![Tag::new("v1.0.0").unwrap()],
-                source_ts: None,
-            },
-            Cursor::new(b"{}".to_vec()),
-        )
-        .await;
+    let push = async |body: &'static [u8]| {
+        registry
+            .accept_put_manifest(
+                None,
+                PutManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Digest(Digest::sha256_of_bytes(body)),
+                    content_type: Some(MediaType::oci_manifest()),
+                    tags: vec![Tag::new("v1.0.0").unwrap()],
+                    source_ts: None,
+                },
+                Cursor::new(body.to_vec()),
+            )
+            .await
+    };
 
+    push(RELEASE)
+        .await
+        .expect("a `?tag=` creating an immutable tag must succeed");
+
+    let result = push(REBUILD).await;
     assert!(
         matches!(result, Err(Error::Conflict(_))),
-        "a `?tag=` creating an immutable tag must be refused, got: {result:?}"
+        "a `?tag=` moving an immutable tag must be refused, got: {result:?}"
     );
 }
 
