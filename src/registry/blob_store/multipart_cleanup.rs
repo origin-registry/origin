@@ -3,13 +3,11 @@
 //! in-flight uploads, applies an age threshold, and spares any upload that
 //! still has a live session marker.
 
-use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::{self, StreamExt};
 use tracing::warn;
 
 use angos_oci::{Namespace, UploadSessionId};
-use angos_storage::Error as StorageError;
 
 use crate::registry::keys::NamespaceKeys;
 use crate::registry::{Error, blob_store::BlobStore, keys::REPOS_ROOT};
@@ -40,27 +38,11 @@ pub fn is_orphan(initiated: DateTime<Utc>, now: DateTime<Utc>, timeout: Duration
 }
 
 /// Orphan multipart-upload cleanup. Discovery and abort are split so a dry-run
-/// caller (scrub without `--commit`) can list without mutating state.
-#[async_trait]
-pub trait MultipartCleanup: Send + Sync {
+/// caller (`prune -d`) can list without mutating state.
+impl BlobStore {
     /// Lists multipart uploads past `timeout` with no live session marker,
     /// mutating nothing.
-    async fn list_orphan_multipart_uploads(
-        &self,
-        timeout: Duration,
-    ) -> Result<Vec<OrphanMultipartUpload>, Error>;
-
-    /// Aborts one orphan returned by
-    /// [`Self::list_orphan_multipart_uploads`].
-    async fn abort_orphan_multipart_upload(
-        &self,
-        upload: &OrphanMultipartUpload,
-    ) -> Result<(), Error>;
-}
-
-#[async_trait]
-impl MultipartCleanup for BlobStore {
-    async fn list_orphan_multipart_uploads(
+    pub async fn list_orphan_multipart_uploads(
         &self,
         timeout: Duration,
     ) -> Result<Vec<OrphanMultipartUpload>, Error> {
@@ -93,12 +75,7 @@ impl MultipartCleanup for BlobStore {
                     // Only the proven absence of the record condemns an upload:
                     // aborting on a transient probe failure would destroy a
                     // progressing upload's parts.
-                    let alive = match self.object.head(&session_path).await {
-                        Ok(_) => Ok(true),
-                        Err(StorageError::NotFound) => Ok(false),
-                        Err(e) => Err(e),
-                    };
-                    match alive {
+                    match self.object.exists(&session_path).await {
                         Ok(true) => None,
                         Ok(false) => Some(OrphanMultipartUpload {
                             key: upload.key,
@@ -129,7 +106,9 @@ impl MultipartCleanup for BlobStore {
         Ok(orphans)
     }
 
-    async fn abort_orphan_multipart_upload(
+    /// Aborts one orphan returned by
+    /// [`Self::list_orphan_multipart_uploads`].
+    pub async fn abort_orphan_multipart_upload(
         &self,
         upload: &OrphanMultipartUpload,
     ) -> Result<(), Error> {
@@ -146,11 +125,12 @@ impl MultipartCleanup for BlobStore {
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use bytes::Bytes;
 
     use angos_storage::{
-        BoxedReader, ByteStream, ChildrenPage, MultipartUploadPage, ObjectMeta, ObjectStore, Page,
-        PendingMultipartUpload,
+        BoxedReader, ByteStream, ChildrenPage, Error as StorageError, MultipartUploadPage,
+        ObjectMeta, ObjectStore, Page, PendingMultipartUpload,
     };
 
     use crate::registry::blob_store::multipart_cleanup::*;

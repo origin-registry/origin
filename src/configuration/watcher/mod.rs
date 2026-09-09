@@ -285,12 +285,6 @@ enum LoopOutcome {
     ChannelClosed,
 }
 
-/// Whether a configuration reload changed the set of watched TLS directories.
-enum TlsDirs {
-    Changed,
-    Unchanged,
-}
-
 async fn run_event_loop(state: &mut WatchState<'_>) -> LoopOutcome {
     loop {
         let Some(event) = state.rx.recv().await else {
@@ -324,14 +318,14 @@ async fn run_event_loop(state: &mut WatchState<'_>) -> LoopOutcome {
         match kind {
             ChangeKind::Irrelevant => {}
             ChangeKind::Config => {
-                let reloaded = reload_config(
+                let tls_dirs_changed = reload_config(
                     state.config,
                     state.cached_config,
                     &state.tls_dirs.raw,
                     state.notifier,
                 )
                 .await;
-                if let TlsDirs::Changed = reloaded {
+                if tls_dirs_changed {
                     return LoopOutcome::RebuildWatcher;
                 }
             }
@@ -350,7 +344,7 @@ async fn reload_config(
     cached_config: &mut Option<Configuration>,
     tls_dirs: &HashSet<PathBuf>,
     notifier: &dyn ConfigNotifier,
-) -> TlsDirs {
+) -> bool {
     info!("Configuration change detected, reloading");
     match Configuration::load_all(&config.paths) {
         Ok(cfg) => {
@@ -359,20 +353,16 @@ async fn reload_config(
                 // effect, so the cache and the watched TLS directories must
                 // keep describing that one.
                 warn!("Configuration was not applied; keeping the previous one");
-                return TlsDirs::Unchanged;
+                return false;
             }
             info!("Configuration reloaded");
             let new_tls_dirs = compute_tls_dirs(&cfg, &config.primary_dir());
             *cached_config = Some(cfg);
-            if new_tls_dirs == *tls_dirs {
-                TlsDirs::Unchanged
-            } else {
-                TlsDirs::Changed
-            }
+            new_tls_dirs != *tls_dirs
         }
         Err(e) => {
             warn!("Failed to reload configuration: {e}");
-            TlsDirs::Unchanged
+            false
         }
     }
 }

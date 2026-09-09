@@ -44,17 +44,7 @@ pub fn push(
         None,
     ));
 
-    if let Some(tag) = reference.as_tag() {
-        ops.push(LinkOperation::create_with_media_type(
-            LinkKind::Tag(tag.clone()),
-            digest.clone(),
-            effective_media_type.cloned(),
-            Some(body_len),
-            annotations.clone(),
-        ));
-    }
-
-    for tag in created_tags {
+    for tag in reference.as_tag().into_iter().chain(created_tags) {
         ops.push(LinkOperation::create_with_media_type(
             LinkKind::Tag(tag.clone()),
             digest.clone(),

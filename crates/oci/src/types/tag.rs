@@ -1,13 +1,6 @@
-use std::{
-    borrow::Borrow,
-    fmt::{Display, Formatter},
-    ops::Deref,
-    str::FromStr,
-    sync::LazyLock,
-};
+use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::types::{Digest, Error};
 
@@ -22,16 +15,11 @@ static TAG_REGEX: LazyLock<Regex> =
 pub struct Tag(String);
 
 impl Tag {
-    /// The single validation predicate shared by every constructor.
-    fn is_valid(s: &str) -> bool {
-        TAG_REGEX.is_match(s)
-    }
-
     /// # Errors
     ///
     /// Returns an error when `s` breaks the OCI tag grammar.
     pub fn new(s: &str) -> Result<Self, Error> {
-        if Self::is_valid(s) {
+        if TAG_REGEX.is_match(s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(Error::InvalidReference(format!("Invalid tag: '{s}'")))
@@ -61,87 +49,12 @@ impl Digest {
     }
 }
 
-impl FromStr for Tag {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl TryFrom<String> for Tag {
-    type Error = Error;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        if Self::is_valid(&s) {
-            Ok(Self(s))
-        } else {
-            Err(Error::InvalidReference(format!("Invalid tag: '{s}'")))
-        }
-    }
-}
-
-impl TryFrom<&str> for Tag {
-    type Error = Error;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl Display for Tag {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for Tag {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for Tag {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Borrow<str> for Tag {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl PartialEq<str> for Tag {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl Serialize for Tag {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Tag {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::try_from(s).map_err(serde::de::Error::custom)
-    }
-}
+str_newtype!(Tag);
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use crate::types::{Algorithm, tag::*};
 
     #[test]

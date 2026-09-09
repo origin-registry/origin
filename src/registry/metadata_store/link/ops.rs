@@ -96,19 +96,12 @@ impl<'a> LinksTx<'a> {
     }
 }
 
-/// What a planned link write captured, for the post-apply cache steps and the
-/// two rejections that leave the plan empty.
+/// What a planned link write captured, for the post-apply cache steps.
 #[derive(Default)]
 struct LinksTxCaptured {
     written_links: Vec<(LinkKind, LinkMetadata)>,
     deleted_links: Vec<LinkKind>,
     prior_targets: Vec<(LinkKind, Option<Digest>)>,
-    /// Set when the last-writer-wins guard rejected the write; the caller maps
-    /// it to [`Error::ReplicationSuperseded`].
-    superseded: Option<String>,
-    /// Set when a strict push referenced a digest the namespace held no entry
-    /// for; the caller maps it to [`Error::ManifestBlobUnknown`].
-    missing_reference: Option<Digest>,
 }
 
 /// The prior link state a committed write was planned against, reported to
@@ -182,6 +175,7 @@ struct WavePlan {
 /// record in `records` and its tag entry in `finals`, so a reader resolving a
 /// tag sees a complete manifest; a delete tombstones tags in `records` and
 /// removes the revision record in `finals`, so tags go first.
+#[derive(Default)]
 struct LinkMutations {
     records: Vec<Mutation>,
     finals: Vec<Mutation>,
@@ -266,15 +260,6 @@ impl MetadataStore {
     ) -> Result<LinksCommit, Error> {
         let (plan, result) = self.plan_links(namespace, operations, &tx).await?;
 
-        if let Some(message) = result.superseded {
-            return Err(Error::ReplicationSuperseded(message));
-        }
-
-        if let Some(digest) = result.missing_reference {
-            warn!("Strict manifest push references {digest} with no blob-index entry; rejecting");
-            return Err(Error::ManifestBlobUnknown);
-        }
-
         // Reference keys land before anything that could commit them.
         let refs_started_at = Instant::now();
         self.apply_writes(&plan.refs).await?;
@@ -356,13 +341,7 @@ impl MetadataStore {
         // A racing writer landing between this read and the waves loses or
         // wins by key name, never by protocol.
         if let Some(message) = lww_superseded(&snapshot, tx) {
-            return Ok((
-                WavePlan::default(),
-                LinksTxCaptured {
-                    superseded: Some(message),
-                    ..LinksTxCaptured::default()
-                },
-            ));
+            return Err(Error::ReplicationSuperseded(message));
         }
 
         let LinksSnapshot { ops, link_cache } = snapshot;
@@ -379,13 +358,8 @@ impl MetadataStore {
         } = build_link_mutations(namespace, &ops, &link_cache, tx, &ownership)?;
 
         if let Some(digest) = missing_reference {
-            return Ok((
-                WavePlan::default(),
-                LinksTxCaptured {
-                    missing_reference: Some(digest),
-                    ..LinksTxCaptured::default()
-                },
-            ));
+            warn!("Strict manifest push references {digest} with no blob-index entry; rejecting");
+            return Err(Error::ManifestBlobUnknown);
         }
 
         if let Some((digest, ops)) = tx.blob_index_ops() {
@@ -407,8 +381,6 @@ impl MetadataStore {
                 written_links,
                 deleted_links,
                 prior_targets: capture_prior_targets(&ops),
-                superseded: None,
-                missing_reference: None,
             },
         ))
     }
@@ -581,20 +553,12 @@ fn build_link_mutations(
     tx: &LinksTx<'_>,
     ownership: &ReferenceOwnership,
 ) -> Result<LinkMutations, Error> {
-    let acc = LinkMutations {
-        records: Vec::new(),
-        finals: Vec::new(),
-        pending_blob_ops: HashMap::new(),
-        written_links: Vec::new(),
-        deleted_links: Vec::new(),
-        missing_reference: None,
-    };
+    let acc = LinkMutations::default();
     let acc = build_create_mutations(namespace, ops, link_cache, tx, ownership, acc)?;
     if acc.missing_reference.is_some() {
         return Ok(acc);
     }
-    let acc = build_delete_mutations(namespace, ops, tx, acc)?;
-    Ok(acc)
+    build_delete_mutations(namespace, ops, tx, acc)
 }
 
 /// Append a link `Put` per `Create` op, recording the inserted or moved

@@ -8,6 +8,7 @@ use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::test_util::frame;
 
 use crate::registry::Error;
+use crate::registry::blob_store::upload_session::HashStart;
 use crate::registry::blob_store::*;
 use crate::registry::keys::NamespaceKeys;
 
@@ -26,6 +27,7 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
                 id,
                 Box::new(Cursor::new(content)),
                 Some(len),
+                HashStart::Fresh(Algorithm::Sha256),
                 Algorithm::Sha256,
             )
             .await
@@ -74,6 +76,7 @@ async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm)
             &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(len),
+            HashStart::Fresh(algorithm),
             algorithm,
         )
         .await
@@ -167,6 +170,7 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
             &session_id,
             Box::new(Cursor::new(test_content.to_vec())),
             Some(test_content.len() as u64),
+            HashStart::Fresh(Algorithm::Sha256),
             Algorithm::Sha256,
         )
         .await
@@ -232,6 +236,7 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
             &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(content.len() as u64),
+            HashStart::Fresh(Algorithm::Sha256),
             Algorithm::Sha256,
         )
         .await
@@ -390,6 +395,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
             &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(content.len() as u64),
+            HashStart::Fresh(Algorithm::Sha256),
             Algorithm::Sha256,
         )
         .await
@@ -431,12 +437,11 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
 
     for chunk in ["one", "two", "three", "four"] {
         store
-            .write_upload(
+            .append_upload(
                 namespace,
                 session_id,
                 Box::new(Cursor::new(chunk.as_bytes().to_vec())),
                 Some(chunk.len() as u64),
-                Algorithm::Sha256,
             )
             .await
             .unwrap();

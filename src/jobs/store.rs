@@ -35,7 +35,6 @@ use angos_storage::{Error as StorageError, ObjectStore, Page};
 use crate::{
     jobs::{JobState, Queue},
     metrics_provider::metrics_provider,
-    registry::metadata_store::MetadataStore,
 };
 
 pub const JOBS_ROOT: &str = "_jobs";
@@ -219,12 +218,12 @@ pub struct JobQueueConfig {
     /// after this long, and the holder refreshes at a third of it.
     #[serde(
         default = "default_claim_ttl_secs",
-        deserialize_with = "deserialize_claim_ttl_secs"
+        deserialize_with = "at_least::<_, { MIN_CLAIM_TTL_SECS }>"
     )]
     pub claim_ttl_secs: u64,
     #[serde(
         default = "default_pending_refresh_interval_secs",
-        deserialize_with = "deserialize_pending_refresh_interval_secs"
+        deserialize_with = "at_least::<_, { MIN_PENDING_REFRESH_INTERVAL_SECS }>"
     )]
     pub pending_refresh_interval_secs: u64,
     #[serde(default = "default_pending_ready_horizon_secs")]
@@ -290,30 +289,15 @@ fn default_claim_ttl_secs() -> u64 {
 /// so a shorter lease lapses before its first refresh can land.
 const MIN_CLAIM_TTL_SECS: u64 = 3;
 
-fn deserialize_claim_ttl_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-    let value = u64::deserialize(deserializer)?;
-    if value < MIN_CLAIM_TTL_SECS {
-        return Err(serde::de::Error::custom(format!(
-            "claim_ttl_secs must be at least {MIN_CLAIM_TTL_SECS} \
-             (the lease is refreshed at a third of it)",
-        )));
-    }
-    Ok(value)
-}
-
 /// Floor on `pending_refresh_interval_secs`: sub-5s ticks induce LIST storms
 /// when several server replicas refresh in parallel.
 const MIN_PENDING_REFRESH_INTERVAL_SECS: u64 = 5;
 
-fn deserialize_pending_refresh_interval_secs<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<u64, D::Error> {
+/// Rejects a value below the `MIN` floor.
+fn at_least<'de, D: Deserializer<'de>, const MIN: u64>(deserializer: D) -> Result<u64, D::Error> {
     let value = u64::deserialize(deserializer)?;
-    if value < MIN_PENDING_REFRESH_INTERVAL_SECS {
-        return Err(serde::de::Error::custom(format!(
-            "pending_refresh_interval_secs must be at least {MIN_PENDING_REFRESH_INTERVAL_SECS} \
-             (sub-{MIN_PENDING_REFRESH_INTERVAL_SECS}s refresh ticks induce LIST storms on S3)",
-        )));
+    if value < MIN {
+        return Err(serde::de::Error::custom(format!("must be at least {MIN}")));
     }
     Ok(value)
 }
@@ -435,30 +419,12 @@ fn parse_lock_key_index(bytes: &[u8]) -> Result<LockKeyIndex, Error> {
 }
 
 /// On-disk shape of a dead-letter record.
-#[derive(Debug, Serialize)]
-struct DeadLetterRecord<'a> {
-    #[serde(flatten)]
-    envelope: &'a JobEnvelope,
-    last_error: &'a str,
-    failed_at: DateTime<Utc>,
-}
-
-/// Owned read counterpart of the write-only [`DeadLetterRecord`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeadLetterRead {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadLetterRecord {
     #[serde(flatten)]
     pub envelope: JobEnvelope,
     pub last_error: String,
     pub failed_at: DateTime<Utc>,
-}
-
-fn serialize_dead_letter(envelope: &JobEnvelope, last_error: &str) -> Result<Vec<u8>, Error> {
-    serde_json::to_vec(&DeadLetterRecord {
-        envelope,
-        last_error,
-        failed_at: Utc::now(),
-    })
-    .map_err(|e| Error::Storage(format!("failed to serialize dead-letter: {e}")))
 }
 
 /// Executor for a single job kind: `Ok(())` reports success, `Err` fails the
@@ -655,31 +621,6 @@ impl JobStore {
         }
     }
 
-    /// [`Self::new`] over the metadata store's backend, which the job queue
-    /// always shares: job records live under that store's `_jobs/` prefix.
-    pub fn alongside(
-        metadata: &MetadataStore,
-        worker_id: impl Into<String>,
-        claim_mode: ClaimMode,
-    ) -> Self {
-        Self::new(metadata.object_store().clone(), worker_id, claim_mode)
-    }
-
-    /// [`Self::alongside`] with an operator-configured retry policy.
-    pub fn alongside_with_retry_policy(
-        metadata: &MetadataStore,
-        worker_id: impl Into<String>,
-        claim_mode: ClaimMode,
-        retry: JobRetryPolicy,
-    ) -> Self {
-        Self::with_retry_policy(
-            metadata.object_store().clone(),
-            worker_id,
-            claim_mode,
-            retry,
-        )
-    }
-
     /// List up to `n` pending storage keys in ascending (readiness) order.
     pub async fn list_pending(&self, queue: Queue, n: u16) -> Result<Vec<String>, Error> {
         let prefix = job_pending_dir(queue.as_str());
@@ -708,7 +649,7 @@ impl JobStore {
         &self,
         queue: Queue,
         storage_key: &str,
-    ) -> Result<DeadLetterRead, Error> {
+    ) -> Result<DeadLetterRecord, Error> {
         let key = job_failed_path(queue.as_str(), storage_key);
         let data = self.store.get(&key).await?;
         serde_json::from_slice(&data)
@@ -843,30 +784,20 @@ impl JobStore {
         let index = parse_lock_key_index(&data)?;
 
         let pending_key = job_pending_path(queue.as_str(), &index.storage_key);
-        match self.store.head(&pending_key).await {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => {
-                // Orphan index: remove it so the caller's enqueue does not
-                // collide on the atomic create and drop a distinct job as a
-                // false dedup hit.
-                match self.store.delete(&index_path).await {
-                    Ok(()) => Ok(false),
-                    Err(e) => {
-                        warn!(
-                            lock_key = %lock_key,
-                            error = %e,
-                            "Failed to remove orphan lock-key index",
-                        );
-                        Err(Error::from(e))
-                    }
-                }
-            }
-            Err(e) => Err(Error::from(e)),
+        if self.store.exists(&pending_key).await? {
+            return Ok(true);
         }
-    }
-
-    async fn get_raw(&self, key: &str) -> Result<Vec<u8>, Error> {
-        self.store.get(key).await.map_err(Error::from)
+        // Orphan index: remove it so the caller's enqueue does not collide on
+        // the atomic create and drop a distinct job as a false dedup hit.
+        if let Err(e) = self.store.delete(&index_path).await {
+            warn!(
+                lock_key = %lock_key,
+                error = %e,
+                "Failed to remove orphan lock-key index",
+            );
+            return Err(Error::from(e));
+        }
+        Ok(false)
     }
 
     /// Retire the dedup index of a just-claimed job so a same-`lock_key` enqueue
@@ -904,12 +835,12 @@ impl JobStore {
         storage_key: &str,
     ) -> Result<(), Error> {
         let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
-        let ours = match self.get_raw(&index_path).await {
+        let ours = match self.store.get(&index_path).await {
             Ok(body) => {
                 parse_lock_key_index(&body).map_or(true, |index| index.storage_key == storage_key)
             }
-            Err(Error::NotFound) => return Ok(()),
-            Err(e) => return Err(e),
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(e.into()),
         };
         if ours {
             self.store.delete(&index_path).await?;
@@ -986,14 +917,7 @@ impl JobStore {
             Err(StorageError::NotFound) => {}
             Err(e) => return Err(Error::from(e)),
         }
-        let record = ClaimRecord {
-            instance: instance.to_string(),
-            expires_at: Utc::now() + ChronoDuration::seconds(self.claim_ttl_secs),
-        };
-        let body = Bytes::from(
-            serde_json::to_vec(&record)
-                .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
-        );
+        let (_, body) = self.claim_body(instance)?;
         self.store.put(key, body).await?;
         sleep(Duration::from_millis(
             ADVISORY_SETTLE_BASE_MS + jitter_below(ADVISORY_SETTLE_JITTER_MS + 1),
@@ -1016,16 +940,20 @@ impl JobStore {
         key: &str,
         instance: &str,
     ) -> Result<Option<DateTime<Utc>>, Error> {
+        let (expires_at, body) = self.claim_body(instance)?;
+        let created = self.store.create_if_absent(key, body).await?;
+        Ok(created.then_some(expires_at))
+    }
+
+    /// A fresh claim record for `instance`: its expiry and the bytes to store.
+    fn claim_body(&self, instance: &str) -> Result<(DateTime<Utc>, Bytes), Error> {
         let record = ClaimRecord {
             instance: instance.to_string(),
             expires_at: Utc::now() + ChronoDuration::seconds(self.claim_ttl_secs),
         };
-        let body = Bytes::from(
-            serde_json::to_vec(&record)
-                .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
-        );
-        let created = self.store.create_if_absent(key, body).await?;
-        Ok(created.then_some(record.expires_at))
+        let body = serde_json::to_vec(&record)
+            .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?;
+        Ok((record.expires_at, Bytes::from(body)))
     }
 
     /// Whether the claim at `key` is safe to take over: its lease lapsed, or
@@ -1284,21 +1212,19 @@ impl JobStore {
     /// Record a failure: re-queue with backoff, or dead-letter once the retry
     /// budget is exhausted.
     pub async fn fail(&self, claimed: ClaimedJob, err: &str) -> Result<FailOutcome, Error> {
+        let new_attempts = claimed.envelope.attempts.saturating_add(1);
+
+        // The queue's budget stands in for an envelope that reached here without
+        // going through `enqueue`.
+        if new_attempts >= claimed.envelope.max_attempts.unwrap_or(self.max_attempts) {
+            return self.fail_terminal(claimed, err).await;
+        }
+
         let ClaimedJob {
             envelope,
             storage_key,
             claim,
         } = claimed;
-        let new_attempts = envelope.attempts.saturating_add(1);
-
-        // The queue's budget stands in for an envelope that reached here without
-        // going through `enqueue`.
-        if new_attempts >= envelope.max_attempts.unwrap_or(self.max_attempts) {
-            return self
-                .fail_dead_letter(claim, envelope, storage_key, err)
-                .await;
-        }
-
         let delay = self.retry_backoff.delay(new_attempts);
         let next_at = Utc::now() + ChronoDuration::from_std(delay).unwrap_or_default();
         let updated = JobEnvelope {
@@ -1307,22 +1233,6 @@ impl JobStore {
         };
 
         self.fail_retry(claim, updated, storage_key, next_at).await
-    }
-
-    /// Dead-letter a job immediately, bypassing the retry budget, when retrying
-    /// cannot succeed.
-    pub async fn fail_terminal(
-        &self,
-        claimed: ClaimedJob,
-        err: &str,
-    ) -> Result<FailOutcome, Error> {
-        let ClaimedJob {
-            envelope,
-            storage_key,
-            claim,
-        } = claimed;
-        self.fail_dead_letter(claim, envelope, storage_key, err)
-            .await
     }
 
     /// Rewrite the pending file under a new storage key encoding the bumped
@@ -1371,16 +1281,20 @@ impl JobStore {
         Ok(FailOutcome::Retried { next_at })
     }
 
-    /// Write the failed record, remove the pending file, and retire the index
-    /// when it still points at this job. Record first, so a crash duplicates
-    /// into the dead letter rather than losing the failure.
-    async fn fail_dead_letter(
+    /// Dead-letter a job immediately, bypassing the retry budget: write the
+    /// record, then drop the pending file and the dedup index when it still
+    /// points at this job. Record first, so a crash duplicates into the dead
+    /// letter rather than losing the failure.
+    pub async fn fail_terminal(
         &self,
-        claim: JobClaim,
-        envelope: JobEnvelope,
-        storage_key: String,
+        claimed: ClaimedJob,
         err: &str,
     ) -> Result<FailOutcome, Error> {
+        let ClaimedJob {
+            envelope,
+            storage_key,
+            claim,
+        } = claimed;
         // A lost claim must not touch queue state the key's new holder now owns.
         if claim.lost() {
             warn!(
@@ -1392,7 +1306,16 @@ impl JobStore {
         let failed_path = job_failed_path(envelope.queue.as_str(), &storage_key);
         let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
 
-        let failed_body = Bytes::from(serialize_dead_letter(&envelope, err)?);
+        let record = DeadLetterRecord {
+            envelope,
+            last_error: err.to_string(),
+            failed_at: Utc::now(),
+        };
+        let failed_body = Bytes::from(
+            serde_json::to_vec(&record)
+                .map_err(|e| Error::Storage(format!("failed to serialize dead-letter: {e}")))?,
+        );
+        let envelope = &record.envelope;
 
         let bury = async {
             self.store.put(&failed_path, failed_body).await?;

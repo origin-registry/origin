@@ -51,23 +51,17 @@ impl TrustedProxy {
     /// Returns `true` when `ip` is this address or belongs to this network.
     /// Families never cross-match: an IPv4 network contains no IPv6 address.
     pub fn contains(&self, ip: IpAddr) -> bool {
-        match (self.network, ip) {
+        let (network, ip, width) = match (self.network, ip) {
             (IpAddr::V4(network), IpAddr::V4(ip)) => {
-                let shift = 32 - u32::from(self.prefix);
-                (network.to_bits() ^ ip.to_bits())
-                    .checked_shr(shift)
-                    .unwrap_or(0)
-                    == 0
+                (u128::from(network.to_bits()), u128::from(ip.to_bits()), 32)
             }
-            (IpAddr::V6(network), IpAddr::V6(ip)) => {
-                let shift = 128 - u32::from(self.prefix);
-                (network.to_bits() ^ ip.to_bits())
-                    .checked_shr(shift)
-                    .unwrap_or(0)
-                    == 0
-            }
-            _ => false,
-        }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => (network.to_bits(), ip.to_bits(), 128),
+            _ => return false,
+        };
+        (network ^ ip)
+            .checked_shr(width - u32::from(self.prefix))
+            .unwrap_or(0)
+            == 0
     }
 }
 

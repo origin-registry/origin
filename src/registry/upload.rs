@@ -2,6 +2,7 @@ use http::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
+use angos_oci::http_range::ByteWindow;
 use angos_oci::request::{
     BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
     PatchUploadRequest, StartUploadRequest,
@@ -15,7 +16,9 @@ use crate::{
     registry::{
         Error, Registry,
         blob_ownership::{GrantOutcome, promote_and_grant},
-        blob_store::{hashing_reader::HashingReader, resumable_hasher::Hasher},
+        blob_store::{
+            hashing_reader::HashingReader, resumable_hasher::Hasher, upload_session::HashStart,
+        },
     },
 };
 
@@ -76,7 +79,7 @@ impl Registry {
         // mid-flight reclaim. The body is already drained, so neither miss may
         // fall through to a fresh write; both surface as retryable conflicts.
         match self
-            .blob_ownership()
+            .metadata_store()
             .grant_existing(&self.blob_store, namespace, digest)
             .await?
         {
@@ -119,7 +122,7 @@ impl Registry {
     ) -> Result<Option<Digest>, Error> {
         if self.blob_store.size(&mount.digest).await.is_err()
             || !self
-                .blob_ownership()
+                .metadata_store()
                 .can_read(source, &mount.digest)
                 .await?
         {
@@ -127,7 +130,7 @@ impl Registry {
         }
 
         match self
-            .blob_ownership()
+            .metadata_store()
             .grant_existing(&self.blob_store, namespace, &mount.digest)
             .await?
         {
@@ -149,7 +152,7 @@ impl Registry {
         }
 
         if let Some(from) = &mount.from {
-            let readable = self.blob_ownership().can_read(from, &mount.digest).await?;
+            let readable = self.metadata_store().can_read(from, &mount.digest).await?;
             return Ok(if readable {
                 vec![from.clone()]
             } else {
@@ -158,7 +161,7 @@ impl Registry {
         }
 
         let mut candidates = self
-            .blob_ownership()
+            .metadata_store()
             .referencing_namespaces(&mount.digest)
             .await?;
         // Sort before truncating so the kept candidates are deterministic.
@@ -208,7 +211,7 @@ impl Registry {
 
         if self.blob_store.size(&digest).await.is_ok()
             && self
-                .blob_ownership()
+                .metadata_store()
                 .can_read(&request.namespace, &digest)
                 .await?
         {
@@ -300,22 +303,18 @@ impl Registry {
         committed: u64,
         content_length: Option<u64>,
     ) -> Result<(), Error> {
-        let limit = self.max_blob_size_bytes;
-        if let Some(len) = content_length
-            && committed.checked_add(len).is_none_or(|total| total > limit)
-        {
-            self.abort_upload_quietly(namespace, session_id).await;
-            return Err(Error::BlobBodyTooLarge {
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
-            });
-        }
-        Ok(())
+        let Some(len) = content_length else {
+            return Ok(());
+        };
+        self.reject_if_oversized(namespace, session_id, committed.saturating_add(len))
+            .await
     }
 
     /// Bound a chunked body to `remaining + 1` bytes so it can never grow the
     /// session past `max_blob_size_bytes` without the extra byte tripping the
-    /// overflow check after the write. A known content-length passes through
-    /// unbounded because [`Self::reject_oversized_known_length`] vetted it.
+    /// overflow check after the write. A known content-length was vetted by
+    /// [`Self::reject_oversized_known_length`], so only the cap itself stops a
+    /// deceptive Content-Length from smuggling extra bytes.
     fn bound_blob_stream<S>(
         &self,
         committed: u64,
@@ -325,13 +324,32 @@ impl Registry {
     where
         S: AsyncRead + Unpin,
     {
-        if content_length.is_some() {
-            // A vetted known length never trips the guard; cap at exactly the
-            // limit so a deceptive Content-Length cannot smuggle extra bytes.
-            return stream.take(self.max_blob_size_bytes.saturating_add(1));
-        }
-        let remaining = self.max_blob_size_bytes.saturating_sub(committed);
+        let remaining = if content_length.is_some() {
+            self.max_blob_size_bytes
+        } else {
+            self.max_blob_size_bytes.saturating_sub(committed)
+        };
         stream.take(remaining.saturating_add(1))
+    }
+
+    /// A chunked body's window can only be checked once read; the session now
+    /// holds bytes the client will never account for, hence the abort.
+    async fn reject_unannounced_chunk(
+        &self,
+        namespace: &Namespace,
+        session_id: &UploadSessionId,
+        content_range: Option<ByteWindow>,
+        content_length: Option<u64>,
+        written: u64,
+    ) -> Result<(), Error> {
+        if content_length.is_none()
+            && let Some(range) = content_range
+            && !range.covers(written)
+        {
+            self.abort_upload_quietly(namespace, session_id).await;
+            return Err(Error::RangeNotSatisfiable);
+        }
+        Ok(())
     }
 
     /// Reject and abort when the write pushed the session's cumulative size
@@ -411,18 +429,14 @@ impl Registry {
 
         self.reject_if_oversized(&request.namespace, &request.session_id, size)
             .await?;
-
-        // A chunked body's length is only known once read, so its window can
-        // only be checked here; the session now holds bytes the client will
-        // never account for, hence the abort.
-        if request.content_length.is_none()
-            && let Some(range) = request.content_range
-            && !range.covers(size.saturating_sub(summary.size))
-        {
-            self.abort_upload_quietly(&request.namespace, &request.session_id)
-                .await;
-            return Err(Error::RangeNotSatisfiable);
-        }
+        self.reject_unannounced_chunk(
+            &request.namespace,
+            &request.session_id,
+            request.content_range,
+            request.content_length,
+            size.saturating_sub(summary.size),
+        )
+        .await?;
 
         Ok(build_response(
             StatusCode::ACCEPTED,
@@ -512,41 +526,33 @@ impl Registry {
         // A monolithic PUT knows its algorithm up front, so it hashes only the
         // target; a chunked finalize must resume the both-algorithm checkpoint
         // its PATCHes left.
-        let (upload_digest, new_total) = if has_prior_writes {
-            self.blob_store
-                .write_upload(
-                    namespace,
-                    session_id,
-                    Box::new(stream),
-                    content_length,
-                    digest.algorithm(),
-                )
-                .await?
+        let start = if has_prior_writes {
+            HashStart::Resume
         } else {
-            self.blob_store
-                .write_monolithic_upload(
-                    namespace,
-                    session_id,
-                    Box::new(stream),
-                    content_length,
-                    digest.algorithm(),
-                )
-                .await?
+            HashStart::Fresh(digest.algorithm())
         };
+        let (upload_digest, new_total) = self
+            .blob_store
+            .write_upload(
+                namespace,
+                session_id,
+                Box::new(stream),
+                content_length,
+                start,
+                digest.algorithm(),
+            )
+            .await?;
 
         self.reject_if_oversized(namespace, session_id, new_total)
             .await?;
-
-        // A chunked body's length is only known once read, so its window can
-        // only be checked here; the session now holds bytes the client will
-        // never account for, hence the abort.
-        if content_length.is_none()
-            && let Some(range) = content_range
-            && !range.covers(new_total.saturating_sub(committed))
-        {
-            self.abort_upload_quietly(namespace, session_id).await;
-            return Err(Error::RangeNotSatisfiable);
-        }
+        self.reject_unannounced_chunk(
+            namespace,
+            session_id,
+            content_range,
+            content_length,
+            new_total.saturating_sub(committed),
+        )
+        .await?;
 
         if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
@@ -612,7 +618,6 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use crate::registry::keys::NamespaceKeys;
     use std::{io::Cursor, str::FromStr, sync::Arc};
 
     use async_trait::async_trait;
@@ -634,7 +639,8 @@ mod tests {
 
     use crate::registry::{
         Error, Registry, RegistryConfig,
-        blob_store::BlobStore,
+        blob_store::{BlobStore, upload_session::HashStart},
+        keys::NamespaceKeys,
         metadata_store::LinkKind,
         repository_resolver::RepositoryResolver,
         test_utils::{
@@ -731,7 +737,7 @@ mod tests {
             );
 
             registry
-                .blob_ownership()
+                .metadata_store()
                 .grant(namespace, &digest)
                 .await
                 .unwrap();
@@ -771,7 +777,7 @@ mod tests {
 
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
-                .blob_ownership()
+                .metadata_store()
                 .grant(source, &digest)
                 .await
                 .unwrap();
@@ -801,7 +807,7 @@ mod tests {
 
             assert!(
                 registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(target, &digest)
                     .await
                     .unwrap(),
@@ -855,7 +861,7 @@ mod tests {
 
             assert!(
                 !registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(target, &digest)
                     .await
                     .unwrap(),
@@ -911,7 +917,7 @@ mod tests {
 
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
-                .blob_ownership()
+                .metadata_store()
                 .grant(owner, &digest)
                 .await
                 .unwrap();
@@ -940,7 +946,7 @@ mod tests {
             assert_eq!(response_digest(&response), digest);
             assert!(
                 registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(target, &digest)
                     .await
                     .unwrap(),
@@ -998,7 +1004,7 @@ mod tests {
             // on the authorized source, not on `owner`.
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
-                .blob_ownership()
+                .metadata_store()
                 .grant(owner, &digest)
                 .await
                 .unwrap();
@@ -1026,7 +1032,7 @@ mod tests {
             );
             assert!(
                 !registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(target, &digest)
                     .await
                     .unwrap(),
@@ -1046,7 +1052,7 @@ mod tests {
             let content = b"candidate resolution blob";
 
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
-            let ownership = registry.blob_ownership();
+            let ownership = registry.metadata_store();
             ownership.grant(source, &digest).await.unwrap();
             ownership.grant(other, &digest).await.unwrap();
 
@@ -1912,7 +1918,7 @@ mod tests {
         let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
         registry
-            .blob_ownership()
+            .metadata_store()
             .grant(first_namespace, &digest)
             .await
             .unwrap();
@@ -1954,7 +1960,7 @@ mod tests {
         assert_eq!(registry.blob_store.read(&digest).await.unwrap(), content);
         assert!(
             registry
-                .blob_ownership()
+                .metadata_store()
                 .can_read(second_namespace, &digest)
                 .await
                 .unwrap()
@@ -1986,7 +1992,7 @@ mod tests {
         let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
         registry
-            .blob_ownership()
+            .metadata_store()
             .grant(first_namespace, &digest)
             .await
             .unwrap();
@@ -2015,7 +2021,7 @@ mod tests {
 
         assert!(
             registry
-                .blob_ownership()
+                .metadata_store()
                 .can_read(second_namespace, &digest)
                 .await
                 .unwrap()
@@ -2291,6 +2297,7 @@ mod tests {
                     &session_id,
                     stream,
                     Some(content.len() as u64),
+                    HashStart::Fresh(Algorithm::Sha256),
                     Algorithm::Sha256,
                 )
                 .await
@@ -2340,6 +2347,7 @@ mod tests {
                     &session_id,
                     stream,
                     Some(content.len() as u64),
+                    HashStart::Fresh(Algorithm::Sha256),
                     Algorithm::Sha256,
                 )
                 .await

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, path::Path};
 
-use serde::{Deserialize, Deserializer, de::Error as DeError};
+use serde::Deserialize;
 use toml::{
     Spanned,
     de::{DeTable, Deserializer as TomlDeserializer},
@@ -22,20 +22,6 @@ pub mod watcher;
 pub use base64_string::Base64String;
 pub use error::Error;
 
-/// Deserialize a positive integer into a `NonZero` type, naming `field` in the
-/// rejection.
-pub fn deserialize_positive_nonzero<'de, D, P, N>(
-    deserializer: D,
-    field: &str,
-) -> Result<N, D::Error>
-where
-    D: Deserializer<'de>,
-    P: Deserialize<'de>,
-    N: TryFrom<P>,
-{
-    let value = P::deserialize(deserializer)?;
-    N::try_from(value).map_err(|_| D::Error::custom(format!("{field} must be > 0")))
-}
 pub use global::GlobalConfig;
 pub use observability::ObservabilityConfig;
 pub use regex_pattern::RegexPattern;
@@ -54,65 +40,30 @@ use crate::{
     registry::{blob_store, repository},
 };
 
-/// Cross-section validation runs in the `TryFrom` conversion, so a parsed
-/// `Configuration` is always a validated one.
+/// Cross-section validation runs in [`Configuration::from_table`], the one
+/// place a file is deserialized, so a loaded `Configuration` is a validated one.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "ConfigurationFields")]
 pub struct Configuration {
     pub server: ServerConfig,
+    #[serde(default)]
     pub global: GlobalConfig,
+    #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
     pub cache: cache::Config,
-    pub blob_store: blob_store::BlobStoreConfig,
-    pub registry_storage: RegistryStorageConfig,
-    pub auth: authenticator::AuthConfig,
-    pub repository: HashMap<String, repository::Config>,
-    pub event_webhook: HashMap<String, EventWebhookConfig>,
-    pub observability: Option<ObservabilityConfig>,
-}
-
-#[derive(Deserialize)]
-struct ConfigurationFields {
-    server: ServerConfig,
-    #[serde(default)]
-    global: GlobalConfig,
-    #[serde(default)]
-    ui: UiConfig,
-    #[serde(default)]
-    cache: cache::Config,
     /// Required: a registry with no configured storage would otherwise default
     /// to the filesystem backend rooted at the process working directory.
-    blob_store: blob_store::BlobStoreConfig,
+    pub blob_store: blob_store::BlobStoreConfig,
     #[serde(default, rename = "metadata_store")]
-    registry_storage: RegistryStorageConfig,
+    pub registry_storage: RegistryStorageConfig,
     #[serde(default)]
-    auth: authenticator::AuthConfig,
+    pub auth: authenticator::AuthConfig,
     #[serde(default)]
-    repository: HashMap<String, repository::Config>,
+    pub repository: HashMap<String, repository::Config>,
     #[serde(default)]
-    event_webhook: HashMap<String, EventWebhookConfig>,
+    pub event_webhook: HashMap<String, EventWebhookConfig>,
     #[serde(default)]
-    observability: Option<ObservabilityConfig>,
-}
-
-impl TryFrom<ConfigurationFields> for Configuration {
-    type Error = Error;
-
-    fn try_from(fields: ConfigurationFields) -> Result<Self, Error> {
-        Configuration {
-            server: fields.server,
-            global: fields.global,
-            ui: fields.ui,
-            cache: fields.cache,
-            blob_store: fields.blob_store,
-            registry_storage: fields.registry_storage,
-            auth: fields.auth,
-            repository: fields.repository,
-            event_webhook: fields.event_webhook,
-            observability: fields.observability,
-        }
-        .validate()
-    }
+    pub observability: Option<ObservabilityConfig>,
 }
 
 impl Configuration {
@@ -181,13 +132,24 @@ impl Configuration {
     /// came from and restores the source excerpt in error messages; a tree
     /// merged from several documents has no single source and passes `None`.
     fn from_table(table: Spanned<DeTable<'_>>, raw: Option<&str>) -> Result<Self, Error> {
-        Self::deserialize(TomlDeserializer::from(table)).map_err(|mut e| {
-            e.set_input(raw);
-            Error::InvalidFormat(e.to_string())
-        })
+        Self::deserialize(TomlDeserializer::from(table))
+            .map_err(|mut e| {
+                e.set_input(raw);
+                Error::InvalidFormat(e.to_string())
+            })?
+            .validate()
     }
 
     fn validate(self) -> Result<Self, Error> {
+        if let Some(name) = self
+            .event_webhook
+            .iter()
+            .find_map(|(name, hook)| hook.events.is_empty().then_some(name))
+        {
+            return Err(Error::InvalidFormat(format!(
+                "event_webhook.{name} must have at least one event"
+            )));
+        }
         validate_global(&self.global, &self.auth.webhook, &self.event_webhook)?;
         validate_blob_store(&self.blob_store)?;
         validate_repositories(&self.repository, &self.auth.webhook, &self.event_webhook)?;

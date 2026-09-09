@@ -1,10 +1,9 @@
 use std::num::NonZeroUsize;
 
 use bytesize::ByteSize;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::{
-    configuration::deserialize_positive_nonzero,
     configuration::{RegexPattern, TrustedProxy},
     jobs::store::JobQueueConfig,
     policy::{AccessPolicyConfig, RetentionPolicyConfig},
@@ -26,21 +25,12 @@ pub const DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS: NonZeroUsize = NonZeroUsize::
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct GlobalConfig {
-    #[serde(
-        default = "default_max_concurrent_requests",
-        deserialize_with = "deserialize_max_concurrent_requests"
-    )]
+    #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: NonZeroUsize,
-    #[serde(
-        default = "default_max_concurrent_cache_jobs",
-        deserialize_with = "deserialize_max_concurrent_cache_jobs"
-    )]
+    #[serde(default = "default_max_concurrent_cache_jobs")]
     pub max_concurrent_cache_jobs: NonZeroUsize,
     /// Worker concurrency for the replication queue.
-    #[serde(
-        default = "default_max_concurrent_replication_jobs",
-        deserialize_with = "deserialize_max_concurrent_replication_jobs"
-    )]
+    #[serde(default = "default_max_concurrent_replication_jobs")]
     pub max_concurrent_replication_jobs: NonZeroUsize,
     #[serde(default = "default_max_manifest_size")]
     pub max_manifest_size: ByteSize,
@@ -125,35 +115,12 @@ fn default_max_concurrent_requests() -> NonZeroUsize {
     DEFAULT_MAX_CONCURRENT_REQUESTS
 }
 
-fn deserialize_max_concurrent_requests<'de, D>(deserializer: D) -> Result<NonZeroUsize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, usize, _>(deserializer, "max_concurrent_requests")
-}
-
 fn default_max_concurrent_cache_jobs() -> NonZeroUsize {
     DEFAULT_MAX_CONCURRENT_CACHE_JOBS
 }
 
-fn deserialize_max_concurrent_cache_jobs<'de, D>(deserializer: D) -> Result<NonZeroUsize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, usize, _>(deserializer, "max_concurrent_cache_jobs")
-}
-
 fn default_max_concurrent_replication_jobs() -> NonZeroUsize {
     DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS
-}
-
-fn deserialize_max_concurrent_replication_jobs<'de, D>(
-    deserializer: D,
-) -> Result<NonZeroUsize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, usize, _>(deserializer, "max_concurrent_replication_jobs")
 }
 
 fn default_max_manifest_size() -> ByteSize {

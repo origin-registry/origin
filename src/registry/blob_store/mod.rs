@@ -36,7 +36,7 @@ pub use config::BlobStoreConfig;
 // construct the inner structs.
 #[cfg(test)]
 pub use config::{FsBackendConfig, S3BackendConfig, TransportFields};
-pub use multipart_cleanup::{MultipartCleanup, OrphanMultipartUpload};
+pub use multipart_cleanup::OrphanMultipartUpload;
 
 pub use angos_storage::BoxedReader;
 

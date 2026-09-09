@@ -319,11 +319,12 @@ impl Validator {
     /// resolvable.
     async fn revision_exists(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
         let record_key = namespace.revision_record_path(digest);
-        match self.metadata_store.object_store().head(&record_key).await {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(RegistryError::from(e).into()),
-        }
+        Ok(self
+            .metadata_store
+            .object_store()
+            .exists(&record_key)
+            .await
+            .map_err(RegistryError::from)?)
     }
 
     /// Emit the namespace's catalog index key when it is missing, once per
@@ -333,16 +334,19 @@ impl Validator {
             return Ok(());
         }
         let key = namespace.catalog_index_path();
-        match self.metadata_store.object_store().head(&key).await {
-            Ok(_) => Ok(()),
-            Err(StorageError::NotFound) => {
-                self.emit(Action::EnsureCatalogIndex {
-                    namespace: namespace.clone(),
-                })
-                .await
-            }
-            Err(e) => Err(RegistryError::from(e).into()),
+        if self
+            .metadata_store
+            .object_store()
+            .exists(&key)
+            .await
+            .map_err(RegistryError::from)?
+        {
+            return Ok(());
         }
+        self.emit(Action::EnsureCatalogIndex {
+            namespace: namespace.clone(),
+        })
+        .await
     }
 
     /// Whether `namespace` already holds `target`. Raw key existence is not
@@ -396,10 +400,14 @@ impl Validator {
             return Ok(());
         };
         let key = namespace.referrer_record_path(subject, referrer);
-        match self.metadata_store.object_store().head(&key).await {
-            Ok(_) => {}
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(RegistryError::from(e).into()),
+        if !self
+            .metadata_store
+            .object_store()
+            .exists(&key)
+            .await
+            .map_err(RegistryError::from)?
+        {
+            return Ok(());
         }
         // A young record may precede its referrer's revision inside a push, or
         // follow a delete the walk raced; either way pruning waits.
@@ -421,10 +429,7 @@ impl Validator {
         subject: &Digest,
         referrer: &Digest,
     ) -> Result<(), Error> {
-        let reverify = move || async move {
-            Ok::<_, Error>(!self.revision_exists(namespace, referrer).await?)
-        };
-        if !reverify().await? {
+        if self.revision_exists(namespace, referrer).await? {
             return Ok(());
         }
         self.emit(Action::DeleteOrphanReferrer {
@@ -444,11 +449,12 @@ impl Validator {
         referrer: &Digest,
     ) -> Result<bool, Error> {
         let key = namespace.referrer_record_path(subject, referrer);
-        match self.metadata_store.object_store().head(&key).await {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(RegistryError::from(e).into()),
-        }
+        Ok(self
+            .metadata_store
+            .object_store()
+            .exists(&key)
+            .await
+            .map_err(RegistryError::from)?)
     }
 
     /// Recreate `link -> expected` when its record is confirmed missing, and
@@ -512,18 +518,16 @@ impl Validator {
             }
             Err(e) => return Err(e.into()),
         }
-        let reverify = move || async move {
-            match self
-                .metadata_store
-                .read_blob_index_namespace(namespace, blob)
-                .await
-            {
-                Ok(links) => Ok(!links.contains(link)),
-                Err(RegistryError::NotFound) => Ok(true),
-                Err(e) => Err(Error::from(e)),
-            }
+        let recorded = match self
+            .metadata_store
+            .read_blob_index_namespace(namespace, blob)
+            .await
+        {
+            Ok(links) => links.contains(link),
+            Err(RegistryError::NotFound) => false,
+            Err(e) => return Err(e.into()),
         };
-        if !reverify().await? {
+        if recorded {
             return Ok(GrantState::Declined);
         }
         self.emit(Action::GrantBlobIndexLink {

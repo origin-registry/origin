@@ -112,7 +112,7 @@ fn later_files_win_over_earlier_ones() {
     let ServerConfig::Insecure(server) = config.server else {
         panic!("expected an insecure listener");
     };
-    assert_eq!(server.base.port, 9443);
+    assert_eq!(server.port, 9443);
 }
 
 /// Validation runs on the merged whole, so a fragment that is not a

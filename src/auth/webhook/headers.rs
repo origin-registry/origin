@@ -26,23 +26,13 @@ static X_REGISTRY_OIDC_PROVIDER: &str = "X-Registry-OIDC-Provider";
 static X_REGISTRY_OIDC_SUBJECT: &str = "X-Registry-OIDC-Subject";
 
 pub fn build_header_name(name: &str) -> Result<HeaderName, Error> {
-    match HeaderName::from_str(name) {
-        Ok(h) => Ok(h),
-        Err(e) => {
-            let msg = format!("Invalid header name '{name}': {e}");
-            Err(Error::Execution(msg))
-        }
-    }
+    HeaderName::from_str(name)
+        .map_err(|e| Error::Execution(format!("Invalid header name '{name}': {e}")))
 }
 
 pub fn build_header_value(value: &str) -> Result<HeaderValue, Error> {
-    match HeaderValue::from_str(value) {
-        Ok(hv) => Ok(hv),
-        Err(e) => {
-            let msg = format!("Invalid header value '{value}': {e}");
-            Err(Error::Execution(msg))
-        }
-    }
+    HeaderValue::from_str(value)
+        .map_err(|e| Error::Execution(format!("Invalid header value '{value}': {e}")))
 }
 
 pub fn build_headers(

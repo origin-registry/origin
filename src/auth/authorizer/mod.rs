@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use http::request::Parts;
 use reqwest::{Client, redirect::Policy};
@@ -33,67 +33,9 @@ struct AuthorizerRepository {
     authorization_webhook: Option<Arc<WebhookAuthorizer>>,
 }
 
-#[derive(Clone, Hash, Eq, PartialEq)]
-struct WebhookClientConfig {
-    server_ca_bundle: Option<PathBuf>,
-    client_certificate_bundle: Option<PathBuf>,
-    client_private_key: Option<PathBuf>,
-}
-
-impl From<&webhook::Config> for WebhookClientConfig {
-    fn from(config: &webhook::Config) -> Self {
-        Self {
-            server_ca_bundle: config.server_ca_bundle.clone(),
-            client_certificate_bundle: config.client_certificate_bundle.clone(),
-            client_private_key: config.client_private_key.clone(),
-        }
-    }
-}
-
-struct AuditIdentity<'a> {
-    auth_type: &'static str,
-    id: Option<&'a str>,
-    username: Option<&'a str>,
-    client_ip: Option<&'a str>,
-    certificate_organizations: &'a [String],
-    certificate_common_names: &'a [String],
-    oidc_provider_name: Option<&'a str>,
-}
-
-// Debug is this projection's sole consumer; the manual impl (not a derive)
-// keeps each logged field an explicit, lint-visible choice.
-impl fmt::Debug for AuditIdentity<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AuditIdentity")
-            .field("auth_type", &self.auth_type)
-            .field("id", &self.id)
-            .field("username", &self.username)
-            .field("client_ip", &self.client_ip)
-            .field("certificate_organizations", &self.certificate_organizations)
-            .field("certificate_common_names", &self.certificate_common_names)
-            .field("oidc_provider_name", &self.oidc_provider_name)
-            .finish()
-    }
-}
-
-impl<'a> From<&'a ClientIdentity> for AuditIdentity<'a> {
-    fn from(identity: &'a ClientIdentity) -> Self {
-        Self {
-            // The single classification the authenticator computed, so the
-            // audit log and the request span never disagree.
-            auth_type: identity.auth_method.as_str(),
-            id: identity.id.as_deref(),
-            username: identity.username.as_deref(),
-            client_ip: identity.client_ip.as_deref(),
-            certificate_organizations: &identity.certificate.organizations,
-            certificate_common_names: &identity.certificate.common_names,
-            oidc_provider_name: identity
-                .oidc
-                .as_ref()
-                .map(|oidc| oidc.provider_name.as_str()),
-        }
-    }
-}
+/// The TLS files a webhook client is built from; webhooks sharing them share
+/// the client.
+type WebhookClientFiles = (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>);
 
 impl Authorizer {
     pub fn new(config: &Configuration, cache: &Arc<Cache>) -> Result<Self, Error> {
@@ -249,9 +191,13 @@ fn build_webhooks(
     cache: &Arc<Cache>,
 ) -> Result<HashMap<String, Arc<WebhookAuthorizer>>, Error> {
     let mut webhooks = HashMap::with_capacity(config.auth.webhook.len());
-    let mut clients: HashMap<WebhookClientConfig, Client> = HashMap::new();
+    let mut clients: HashMap<WebhookClientFiles, Client> = HashMap::new();
     for (name, webhook_config) in &config.auth.webhook {
-        let client_config = WebhookClientConfig::from(webhook_config);
+        let client_config = (
+            webhook_config.server_ca_bundle.clone(),
+            webhook_config.client_certificate_bundle.clone(),
+            webhook_config.client_private_key.clone(),
+        );
         let client = if let Some(client) = clients.get(&client_config) {
             client.clone()
         } else {
@@ -345,10 +291,19 @@ async fn enforce_webhook(
     Err(Error::Unauthorized(ACCESS_DENIED.to_string()))
 }
 
+/// The audit line names the authenticator's one classification, so it and the
+/// request span never disagree.
 fn log_denial(reason: &str, identity: &ClientIdentity) {
     info!(
-        "Access denied: {reason} | Identity: {:?}",
-        AuditIdentity::from(identity)
+        "Access denied: {reason} | Identity: auth_type={} id={:?} username={:?} client_ip={:?} \
+         certificate_organizations={:?} certificate_common_names={:?} oidc_provider_name={:?}",
+        identity.auth_method.as_str(),
+        identity.id,
+        identity.username,
+        identity.client_ip,
+        identity.certificate.organizations,
+        identity.certificate.common_names,
+        identity.oidc.as_ref().map(|oidc| &oidc.provider_name),
     );
 }
 

@@ -15,7 +15,7 @@ use crate::{
         ServerContext,
         listeners::{
             Connector,
-            insecure::{InsecureConnector, InsecureListener, InsecureListenerConfig},
+            insecure::{InsecureConnector, InsecureListener},
         },
         server_context::tests::{
             TestConfigOptions, TestWebhook, create_test_event, create_test_server_context,
@@ -28,15 +28,12 @@ use crate::{
 
 #[test]
 fn test_config_default_values() {
-    let config = InsecureListenerConfig::default();
+    let config = ListenerBaseConfig::default();
 
-    assert_eq!(config.base.port, 8000);
-    assert_eq!(config.base.query_timeout.get(), 3600);
-    assert_eq!(config.base.query_timeout_grace_period.get(), 60);
-    assert_eq!(
-        config.base.bind_address,
-        IpAddr::from(Ipv4Addr::from([0; 4]))
-    );
+    assert_eq!(config.port, 8000);
+    assert_eq!(config.query_timeout.get(), 3600);
+    assert_eq!(config.query_timeout_grace_period.get(), 60);
+    assert_eq!(config.bind_address, IpAddr::from(Ipv4Addr::from([0; 4])));
 }
 
 #[test]
@@ -48,13 +45,13 @@ fn test_config_custom_values() {
         query_timeout_grace_period = 120
     "#;
 
-    let config: InsecureListenerConfig = toml::from_str(toml).unwrap();
+    let config: ListenerBaseConfig = toml::from_str(toml).unwrap();
 
-    assert_eq!(config.base.port, 9000);
-    assert_eq!(config.base.query_timeout.get(), 7200);
-    assert_eq!(config.base.query_timeout_grace_period.get(), 120);
+    assert_eq!(config.port, 9000);
+    assert_eq!(config.query_timeout.get(), 7200);
+    assert_eq!(config.query_timeout_grace_period.get(), 120);
     assert_eq!(
-        config.base.bind_address,
+        config.bind_address,
         "192.168.1.100".parse::<IpAddr>().unwrap()
     );
 }
@@ -66,9 +63,9 @@ fn test_config_rejects_zero_query_timeout() {
         query_timeout = 0
     "#;
 
-    let error = toml::from_str::<InsecureListenerConfig>(toml).unwrap_err();
+    let error = toml::from_str::<ListenerBaseConfig>(toml).unwrap_err();
 
-    assert!(error.to_string().contains("query_timeout must be > 0"));
+    assert!(error.to_string().contains("query_timeout"), "got: {error}");
 }
 
 #[test]
@@ -78,12 +75,11 @@ fn test_config_rejects_zero_query_timeout_grace_period() {
         query_timeout_grace_period = 0
     "#;
 
-    let error = toml::from_str::<InsecureListenerConfig>(toml).unwrap_err();
+    let error = toml::from_str::<ListenerBaseConfig>(toml).unwrap_err();
 
     assert!(
-        error
-            .to_string()
-            .contains("query_timeout_grace_period must be > 0")
+        error.to_string().contains("query_timeout_grace_period"),
+        "got: {error}"
     );
 }
 
@@ -93,11 +89,11 @@ fn test_config_partial_defaults() {
         bind_address = "10.0.0.1"
     "#;
 
-    let config: InsecureListenerConfig = toml::from_str(toml).unwrap();
+    let config: ListenerBaseConfig = toml::from_str(toml).unwrap();
 
-    assert_eq!(config.base.port, 8000);
-    assert_eq!(config.base.query_timeout.get(), 3600);
-    assert_eq!(config.base.query_timeout_grace_period.get(), 60);
+    assert_eq!(config.port, 8000);
+    assert_eq!(config.query_timeout.get(), 3600);
+    assert_eq!(config.query_timeout_grace_period.get(), 60);
 }
 
 #[test]
@@ -107,22 +103,20 @@ fn test_config_ipv6_address() {
         port = 8443
     "#;
 
-    let config: InsecureListenerConfig = toml::from_str(toml).unwrap();
+    let config: ListenerBaseConfig = toml::from_str(toml).unwrap();
 
-    assert_eq!(config.base.bind_address, IpAddr::from(Ipv6Addr::LOCALHOST));
-    assert_eq!(config.base.port, 8443);
+    assert_eq!(config.bind_address, IpAddr::from(Ipv6Addr::LOCALHOST));
+    assert_eq!(config.port, 8443);
 }
 
 #[tokio::test]
 async fn test_insecure_listener_new() {
-    let config = InsecureListenerConfig {
-        base: ListenerBaseConfig {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8080,
-            query_timeout: NonZeroU64::new(1800).unwrap(),
-            query_timeout_grace_period: NonZeroU64::new(30).unwrap(),
-            handshake_timeout: NonZeroU64::new(10).unwrap(),
-        },
+    let config = ListenerBaseConfig {
+        bind_address: "127.0.0.1".parse().unwrap(),
+        port: 8080,
+        query_timeout: NonZeroU64::new(1800).unwrap(),
+        query_timeout_grace_period: NonZeroU64::new(30).unwrap(),
+        handshake_timeout: NonZeroU64::new(10).unwrap(),
     };
 
     let context = create_test_server_context().await;
@@ -136,14 +130,12 @@ async fn test_insecure_listener_new() {
 
 #[tokio::test]
 async fn test_insecure_listener_new_with_ipv6() {
-    let config = InsecureListenerConfig {
-        base: ListenerBaseConfig {
-            bind_address: "::1".parse().unwrap(),
-            port: 9000,
-            query_timeout: NonZeroU64::new(3600).unwrap(),
-            query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
-            handshake_timeout: NonZeroU64::new(10).unwrap(),
-        },
+    let config = ListenerBaseConfig {
+        bind_address: "::1".parse().unwrap(),
+        port: 9000,
+        query_timeout: NonZeroU64::new(3600).unwrap(),
+        query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+        handshake_timeout: NonZeroU64::new(10).unwrap(),
     };
 
     let context = create_test_server_context().await;
@@ -158,14 +150,12 @@ async fn test_insecure_listener_new_with_ipv6() {
 
 #[tokio::test]
 async fn test_insecure_listener_timeouts_initialization() {
-    let config = InsecureListenerConfig {
-        base: ListenerBaseConfig {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8080,
-            query_timeout: NonZeroU64::new(5000).unwrap(),
-            query_timeout_grace_period: NonZeroU64::new(100).unwrap(),
-            handshake_timeout: NonZeroU64::new(10).unwrap(),
-        },
+    let config = ListenerBaseConfig {
+        bind_address: "127.0.0.1".parse().unwrap(),
+        port: 8080,
+        query_timeout: NonZeroU64::new(5000).unwrap(),
+        query_timeout_grace_period: NonZeroU64::new(100).unwrap(),
+        handshake_timeout: NonZeroU64::new(10).unwrap(),
     };
 
     let context = create_test_server_context().await;
@@ -189,7 +179,7 @@ async fn create_context_with_webhook(webhook_url: &str) -> ServerContext {
 
 #[tokio::test]
 async fn test_hot_reload_updates_webhook_config() {
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context_without_webhooks = create_test_server_context().await;
     let listener = InsecureListener::new(&listener_config, context_without_webhooks);
 
@@ -203,7 +193,7 @@ async fn test_hot_reload_updates_webhook_config() {
 
 #[tokio::test]
 async fn test_hot_reload_removes_webhooks() {
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context_with_webhooks = create_context_with_webhook("https://example.com/webhook").await;
     let listener = InsecureListener::new(&listener_config, context_with_webhooks);
 
@@ -234,7 +224,7 @@ async fn test_hot_reload_changes_webhook_url() {
         .mount(&server_b)
         .await;
 
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let webhook_a = format!("{}/webhook", server_a.uri());
     let context_a = create_context_with_webhook(&webhook_a).await;
     let listener = InsecureListener::new(&listener_config, context_a);
@@ -286,7 +276,7 @@ async fn test_hot_reload_adds_second_webhook() {
         .mount(&server_b)
         .await;
 
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context_one = create_context_with_webhook(&server_a.uri()).await;
     let listener = InsecureListener::new(&listener_config, context_one);
 
@@ -318,7 +308,7 @@ async fn test_hot_reload_removes_one_of_two_webhooks() {
         .mount(&server_b)
         .await;
 
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context_two = create_context_with_two_webhooks(&server_a.uri(), &server_b.uri()).await;
     let listener = InsecureListener::new(&listener_config, context_two);
 
@@ -337,14 +327,16 @@ async fn test_hot_reload_removes_one_of_two_webhooks() {
 // server context.
 #[tokio::test]
 async fn test_hot_reload_updates_timeouts() {
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context = create_test_server_context().await;
     let listener = InsecureListener::new(&listener_config, context);
     assert_eq!(listener.current_timeouts().query, Duration::from_hours(1));
 
-    let mut reloaded = InsecureListenerConfig::default();
-    reloaded.base.query_timeout = NonZeroU64::new(10).unwrap();
-    reloaded.base.query_timeout_grace_period = NonZeroU64::new(5).unwrap();
+    let reloaded = ListenerBaseConfig {
+        query_timeout: NonZeroU64::new(10).unwrap(),
+        query_timeout_grace_period: NonZeroU64::new(5).unwrap(),
+        ..ListenerBaseConfig::default()
+    };
     listener.notify_config_change(&reloaded, create_test_server_context().await);
 
     assert_eq!(listener.current_timeouts().query, Duration::from_secs(10));
@@ -368,7 +360,7 @@ async fn test_hot_reload_in_flight_delivery_not_disrupted() {
         .mount(&server_new)
         .await;
 
-    let listener_config = InsecureListenerConfig::default();
+    let listener_config = ListenerBaseConfig::default();
     let context_old = create_context_with_webhook(&server_old.uri()).await;
     let listener = InsecureListener::new(&listener_config, context_old);
 

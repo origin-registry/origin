@@ -15,7 +15,6 @@ use crate::{
     jobs::store::{Error as JobError, JobHandler},
     registry::{
         Error as RegistryError,
-        blob_ownership::BlobOwnership,
         repository_resolver::RepositoryResolver,
         test_utils::{FsTestStack, create_test_repositories, fs_test_stack, put_blob_body},
     },
@@ -35,7 +34,7 @@ async fn cache_fill_grant_emits_blob_push_with_internal_actor() {
         policy: DeliveryPolicy::Required,
         token: None,
         timeout_ms: 5_000,
-        max_retries: 0,
+        max_retries: Some(0),
         events: vec![EventKind::BlobPush],
         repository_filter: None,
     };
@@ -66,7 +65,8 @@ async fn cache_fill_grant_emits_blob_push_with_internal_actor() {
     handler.execute(&envelope).await.expect("cache fill");
 
     assert!(
-        BlobOwnership::new(metadata_store.as_ref())
+        metadata_store
+            .as_ref()
             .can_read(&namespace, &digest)
             .await
             .unwrap(),

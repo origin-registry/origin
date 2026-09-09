@@ -66,22 +66,17 @@ impl InProcessLoops {
     }
 }
 
-/// How many in-process claim loops to run per queue, from `[global]`.
-struct InProcessConcurrency {
-    cache: NonZeroUsize,
-    replication: NonZeroUsize,
-}
-
-/// Spawn the claim loops draining `job_store`. Replication drains only when a
-/// downstream is configured: an always-empty queue would just storm the object
-/// store with `LIST`s.
+/// Spawn `cache_loops` and `replication_loops` claim loops draining
+/// `job_store`. Replication drains only when a downstream is configured: an
+/// always-empty queue would just storm the object store with `LIST`s.
 fn spawn_in_process_loops(
     job_store: &Arc<JobStore>,
     resolver: &Arc<RepositoryResolver>,
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
     event_dispatcher: Option<Arc<EventDispatcher>>,
-    concurrency: &InProcessConcurrency,
+    cache_loops: NonZeroUsize,
+    replication_loops: NonZeroUsize,
 ) -> InProcessLoops {
     let shutdown = CancellationToken::new();
     let tracker = TaskTracker::new();
@@ -92,7 +87,7 @@ fn spawn_in_process_loops(
         metadata_store.clone(),
         event_dispatcher,
     ));
-    for _ in 0..concurrency.cache.get() {
+    for _ in 0..cache_loops.get() {
         tracker.spawn(claim_loop(
             job_store.clone(),
             cache_handler.clone(),
@@ -113,7 +108,7 @@ fn spawn_in_process_loops(
             blob_store.clone(),
             metadata_store.clone(),
         ));
-        for _ in 0..concurrency.replication.get() {
+        for _ in 0..replication_loops.get() {
             tracker.spawn(claim_loop(
                 job_store.clone(),
                 replication_handler.clone(),
@@ -172,8 +167,8 @@ pub async fn build_registry(
     let (job_store, depth_refresh, in_process_loops) =
         if let Some(jq_config) = &config.global.job_queue {
             let claim_mode = job_store::ensure_claim_support(metadata_store.object_store()).await?;
-            let job_store: Arc<JobStore> = Arc::new(JobStore::alongside_with_retry_policy(
-                &metadata_store,
+            let job_store: Arc<JobStore> = Arc::new(JobStore::with_retry_policy(
+                metadata_store.object_store().clone(),
                 "server",
                 claim_mode,
                 jq_config.retry_policy(),
@@ -186,8 +181,8 @@ pub async fn build_registry(
             (job_store, Some(refresh), InProcessLoops::none())
         } else {
             // Atomic mode: in-process draining runs no startup probe to pick one.
-            let job_store: Arc<JobStore> = Arc::new(JobStore::alongside(
-                &metadata_store,
+            let job_store: Arc<JobStore> = Arc::new(JobStore::new(
+                metadata_store.object_store().clone(),
                 "in-process",
                 ClaimMode::Atomic,
             ));
@@ -197,10 +192,8 @@ pub async fn build_registry(
                 &blob_backend,
                 &metadata_store,
                 event_dispatcher.clone(),
-                &InProcessConcurrency {
-                    cache: config.global.max_concurrent_cache_jobs,
-                    replication: config.global.max_concurrent_replication_jobs,
-                },
+                config.global.max_concurrent_cache_jobs,
+                config.global.max_concurrent_replication_jobs,
             );
             (job_store, None, loops)
         };
@@ -241,7 +234,7 @@ mod tests {
     use angos_oci::header::DOCKER_CONTENT_DIGEST;
     use angos_oci::{Namespace, Tag};
 
-    use super::{InProcessConcurrency, InProcessLoops, spawn_in_process_loops};
+    use super::{InProcessLoops, spawn_in_process_loops};
     use crate::{
         configuration::global::{
             DEFAULT_MAX_CONCURRENT_CACHE_JOBS, DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS,
@@ -286,8 +279,8 @@ mod tests {
             blob_store,
         } = fs_test_stack();
         let resolver = single_repo_resolver(REPO, repository);
-        let job_store: Arc<JobStore> = Arc::new(JobStore::alongside(
-            &metadata_store,
+        let job_store: Arc<JobStore> = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
             "in-process",
             ClaimMode::Atomic,
         ));
@@ -297,10 +290,8 @@ mod tests {
             &blob_store,
             &metadata_store,
             None,
-            &InProcessConcurrency {
-                cache: DEFAULT_MAX_CONCURRENT_CACHE_JOBS,
-                replication: DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS,
-            },
+            DEFAULT_MAX_CONCURRENT_CACHE_JOBS,
+            DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS,
         );
         let registry = Registry::new(
             blob_store,

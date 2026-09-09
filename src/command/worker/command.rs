@@ -239,8 +239,8 @@ impl WorkerContext {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            Arc::new(JobStore::alongside_with_retry_policy(
-                &metadata_store,
+            Arc::new(JobStore::with_retry_policy(
+                metadata_store.object_store().clone(),
                 "worker",
                 claim_mode,
                 retry_policy,
@@ -260,8 +260,8 @@ impl WorkerContext {
     /// A fresh `JobStore` consumer over the shared storage, plus the handler
     /// bound to `queue`.
     fn components_for(&self, queue: Queue) -> Components {
-        let consumer = Arc::new(JobStore::alongside_with_retry_policy(
-            &self.metadata_store,
+        let consumer = Arc::new(JobStore::with_retry_policy(
+            self.metadata_store.object_store().clone(),
             Uuid::new_v4().to_string(),
             self.claim_mode,
             self.retry_policy,
@@ -364,8 +364,8 @@ mod tests {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            RegistryConfig::new(Arc::new(JobStore::alongside(
-                &metadata_store,
+            RegistryConfig::new(Arc::new(JobStore::new(
+                metadata_store.object_store().clone(),
                 "worker-test",
                 ClaimMode::Atomic,
             ))),

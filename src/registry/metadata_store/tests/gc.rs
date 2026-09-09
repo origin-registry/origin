@@ -127,7 +127,7 @@ async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
     let claim = store.gc_claim(&digest, &digest).await.unwrap();
     let outcome = case
         .registry()
-        .blob_ownership()
+        .metadata_store()
         .grant_existing(&case.blob_store(), &namespace, &digest)
         .await
         .unwrap();
@@ -165,7 +165,7 @@ async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     // The sweep wins the race.
     case.blob_store().delete_blob(&digest).await.unwrap();
     let outcome = registry
-        .blob_ownership()
+        .metadata_store()
         .grant_existing(&case.blob_store(), &namespace, &digest)
         .await
         .unwrap();

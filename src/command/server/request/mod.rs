@@ -11,7 +11,7 @@ use hyper::{
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
-use angos_oci::http_range::{ByteWindow, Error as RangeError, RequestRange};
+use angos_oci::http_range::{ByteWindow, RequestRange};
 use angos_oci::server;
 use angos_oci::{MediaRange, MediaType};
 
@@ -118,7 +118,7 @@ impl<'a> RequestHeaders<'a> {
                     end: Some(end),
                 })
             })
-            .map_err(|error| not_satisfiable(&error))
+            .map_err(|error| Error::RangeNotSatisfiable(error.to_string()))
     }
 
     /// The window a blob `GET` asks for, `None` when it names none, names
@@ -145,10 +145,6 @@ impl<'a> RequestHeaders<'a> {
 
         Ok(Some(value.to_string()))
     }
-}
-
-fn not_satisfiable(error: &RangeError) -> Error {
-    Error::RangeNotSatisfiable(error.to_string())
 }
 
 fn parse_content_length(value: &HeaderValue) -> Result<u64, Error> {

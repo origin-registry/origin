@@ -228,10 +228,10 @@ impl EventDispatcher {
                 name,
                 WebhookEndpoint {
                     client,
+                    max_retries: config.max_retries(),
                     url: config.url,
                     policy: config.policy,
                     token: config.token,
-                    max_retries: config.max_retries,
                     events: config.events,
                     repository_filter: config.repository_filter,
                 },

@@ -22,10 +22,6 @@ pub struct PeerCertificate(pub Arc<Vec<u8>>);
 pub struct MtlsValidator;
 
 impl MtlsValidator {
-    pub fn new() -> Self {
-        Self
-    }
-
     /// The organizations and common names of a certificate subject. Entries
     /// that are not valid UTF-8 are dropped, so this cannot fail.
     #[instrument(skip(cert))]
@@ -46,12 +42,6 @@ impl MtlsValidator {
             organizations,
             common_names,
         }
-    }
-}
-
-impl Default for MtlsValidator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -122,7 +112,7 @@ pub mod tests {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                let validator = MtlsValidator::new();
+                let validator = MtlsValidator;
                 let mut parts = empty_parts();
                 parts
                     .extensions
@@ -148,7 +138,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_authenticate_no_certificate() {
-        let validator = MtlsValidator::new();
+        let validator = MtlsValidator;
         let parts = empty_parts();
         let mut identity = ClientIdentity::new(None);
 
@@ -162,7 +152,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_authenticate_with_valid_certificate() {
-        let validator = MtlsValidator::new();
+        let validator = MtlsValidator;
         let mut parts = empty_parts();
         parts
             .extensions
@@ -180,7 +170,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_authenticate_with_minimal_certificate() {
-        let validator = MtlsValidator::new();
+        let validator = MtlsValidator;
         let mut parts = empty_parts();
         parts
             .extensions

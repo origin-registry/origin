@@ -100,16 +100,9 @@ async fn test_build_repository_with_upstream() {
         }],
         ..repository::Config::default()
     };
-    let cache_config = cache::Config::Memory;
-    let cache = bootstrap::auth_cache(&cache_config).unwrap();
-
-    let result = bootstrap::repository(
-        "cached-repo",
-        &repo_config,
-        &cache,
-        DEFAULT_MAX_MANIFEST_SIZE_BYTES,
-    )
-    .await;
+    let cache = cache::Config::Memory.to_backend().unwrap();
+    let configs = HashMap::from([("cached-repo".to_string(), repo_config)]);
+    let result = bootstrap::repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
 
     assert!(result.is_ok());
 }
@@ -129,7 +122,7 @@ async fn test_build_repositories_multiple() {
     configs.insert("repo3".to_string(), repo_config);
 
     let cache_config = cache::Config::Memory;
-    let cache = bootstrap::auth_cache(&cache_config).unwrap();
+    let cache = cache_config.to_backend().unwrap();
 
     let result = bootstrap::repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
 
@@ -144,11 +137,8 @@ async fn test_build_repositories_multiple() {
 #[tokio::test]
 async fn test_build_registry_minimal_config() {
     let (config, _blobs, _meta) = create_minimal_config();
-    let result = setup::build_registry(
-        &config,
-        &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-    )
-    .await;
+    let result =
+        setup::build_registry(&config, &config.cache.to_backend().expect("auth cache")).await;
 
     assert!(result.is_ok());
 }
@@ -201,7 +191,7 @@ async fn test_command_notify_tls_config_change_with_insecure_listener() {
 async fn test_build_registry_components_integration() {
     let (config, _blobs, _meta) = create_config_with_repository();
 
-    let auth_cache = bootstrap::auth_cache(&config.cache).unwrap();
+    let auth_cache = config.cache.to_backend().unwrap();
     let blob_backend = std::sync::Arc::new(config.blob_store.build_backend().unwrap());
     let metadata_store = bootstrap::metadata_store(
         &config.resolve_registry_storage(),

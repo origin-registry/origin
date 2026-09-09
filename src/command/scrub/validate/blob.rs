@@ -17,7 +17,7 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    registry::{Error as RegistryError, blob_store::upload_session::decode_session_file},
+    registry::{Error as RegistryError, blob_store::upload_session::SessionFile},
 };
 
 impl Validator {
@@ -104,7 +104,7 @@ impl Validator {
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(RegistryError::from(e).into()),
         };
-        if decode_session_file(&raw).is_err() {
+        if SessionFile::decode(&raw).is_err() {
             warn!("scrub: upload session record '{key}' does not parse; deleting");
             self.delete_corrupt(WalkedStore::Blob, key).await?;
         }

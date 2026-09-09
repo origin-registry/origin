@@ -16,7 +16,7 @@ use crate::{
     registry::{
         Error, Registry, Repository,
         blob_ownership::promote_and_grant,
-        blob_store::{BlobStore, BoxedReader},
+        blob_store::{BlobStore, BoxedReader, upload_session::HashStart},
         metadata_store::{LinkKind, MetadataStore},
         pull_through_name, record_pull_through, repository_name,
     },
@@ -100,11 +100,12 @@ async fn fill_cache_session(
 ) -> Result<(), Error> {
     // A single-shot copy of a known blob: hash only the target algorithm.
     let (computed_digest, hashed_size) = blob_store
-        .write_monolithic_upload(
+        .write_upload(
             namespace,
             session_key,
             stream,
             Some(content_length),
+            HashStart::Fresh(digest.algorithm()),
             digest.algorithm(),
         )
         .await?;
@@ -134,7 +135,7 @@ impl Registry {
         request: HeadBlobRequest,
     ) -> Result<Response<ResponseBody>, Error> {
         let has_access = self
-            .blob_ownership()
+            .metadata_store()
             .can_read(&request.namespace, &request.digest)
             .await?;
         // A namespace no `[repository]` entry matches has no upstream, so it
@@ -240,18 +241,16 @@ impl Registry {
     /// logged and counted but never bubbles up, so a scheduling glitch cannot
     /// degrade the client response.
     async fn dispatch_cache_fill(&self, namespace: &Namespace, digest: &Digest) {
-        let envelope = match build_envelope(namespace, digest) {
-            Ok(envelope) => envelope,
-            Err(e) => {
-                warn!("Failed to build cache job envelope for {digest}: {e}");
-                metrics_provider()
-                    .job_queue_enqueue_failures_total
-                    .with_label_values(&[Queue::Cache.as_str()])
-                    .inc();
-                return;
-            }
+        // Build + enqueue as one fallible step so failures share the warn + metric path.
+        let outcome = match build_envelope(namespace, digest) {
+            Ok(envelope) => self
+                .job_queue
+                .enqueue(envelope)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
         };
-        if let Err(e) = self.job_queue.enqueue(envelope).await {
+        if let Err(e) = outcome {
             warn!("Failed to enqueue cache job for {digest}: {e}");
             metrics_provider()
                 .job_queue_enqueue_failures_total
@@ -290,7 +289,7 @@ impl Registry {
         &self,
         request: DeleteBlobRequest,
     ) -> Result<Response<ResponseBody>, Error> {
-        let ownership = self.blob_ownership();
+        let ownership = self.metadata_store();
         let links = ownership
             .references(&request.namespace, &request.digest)
             .await?;
@@ -342,7 +341,7 @@ impl Registry {
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
 
         let has_access = self
-            .blob_ownership()
+            .metadata_store()
             .can_read(&request.namespace, &request.digest)
             .await?;
 
@@ -489,7 +488,7 @@ mod tests {
         let registry = create_test_registry(blob_store, metadata_store_over(object));
 
         registry
-            .blob_ownership()
+            .metadata_store()
             .grant(namespace, &digest)
             .await
             .unwrap();
@@ -591,7 +590,7 @@ mod tests {
 
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
-                .blob_ownership()
+                .metadata_store()
                 .grant(namespace, &digest)
                 .await
                 .unwrap();
@@ -617,7 +616,7 @@ mod tests {
             assert!(registry.blob_store.read(&digest).await.is_ok());
             assert!(
                 !registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(namespace, &digest)
                     .await
                     .unwrap()
@@ -667,7 +666,7 @@ mod tests {
             assert_eq!(stored_content, content);
             assert!(
                 registry
-                    .blob_ownership()
+                    .metadata_store()
                     .can_read(namespace, &digest)
                     .await
                     .unwrap(),
@@ -687,7 +686,7 @@ mod tests {
             let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"stale referenced blob";
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
-            let ownership = registry.blob_ownership();
+            let ownership = registry.metadata_store();
             ownership.grant(namespace, &digest).await.unwrap();
 
             let link = LinkKind::Config(digest.clone());
@@ -772,7 +771,7 @@ mod tests {
                 let digest =
                     put_blob_direct(registry.metadata_store.object_store(), &content).await;
                 registry
-                    .blob_ownership()
+                    .metadata_store()
                     .grant(namespace, &digest)
                     .await
                     .unwrap();
@@ -839,7 +838,7 @@ mod tests {
             let second = &Namespace::new("test-repo/second").unwrap();
             let content = b"shared blob content";
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
-            let ownership = registry.blob_ownership();
+            let ownership = registry.metadata_store();
 
             ownership.grant(first, &digest).await.unwrap();
             ownership.grant(second, &digest).await.unwrap();

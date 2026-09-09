@@ -226,7 +226,7 @@ fn repository_with_downstream(client: Arc<RegistryClient>) -> Repository {
 fn repository_with_named_downstream(name: &str, client: Arc<RegistryClient>) -> Repository {
     repository_with_replication(
         REPO,
-        vec![ReplicationDownstream::builder(name.to_string(), client, 4).build()],
+        vec![ReplicationDownstream::new(name.to_string(), client, 4)],
     )
 }
 
@@ -415,16 +415,15 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
 
     // REPO stays `nginx` so the resolver routes `nginx/app` to this repo; the
     // downstream carries the strip+prepend mapping.
-    let downstream = ReplicationDownstream::builder(
-        DOWNSTREAM.to_string(),
-        downstream_client(&mock_server.uri()),
-        4,
-    )
-    .namespace_mapping(
-        Some(Namespace::new("nginx").unwrap()),
-        Some(Namespace::new("mirror").unwrap()),
-    )
-    .build();
+    let downstream = ReplicationDownstream {
+        local_namespace: Some(Namespace::new("nginx").unwrap()),
+        target_namespace: Some(Namespace::new("mirror").unwrap()),
+        ..ReplicationDownstream::new(
+            DOWNSTREAM.to_string(),
+            downstream_client(&mock_server.uri()),
+            4,
+        )
+    };
     let resolver = single_repo_resolver(REPO, repository_with_replication(REPO, vec![downstream]));
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);

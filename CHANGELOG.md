@@ -9,6 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `blob_stream_frame_size` (default `128KiB`) sets the read buffer each frame of a streamed blob response is filled from, replacing a fixed 4 KiB frame that cost a quarter of a million allocations and body writes per GiB served.
+- The `/v2/_angos/<name>/namespaces/list` platform object carries the `os.version`, `os.features` and `features` an image index declares, where it previously kept only `os`, `architecture` and `variant`.
+
+### Changed
+
+- A zero in a setting that must be positive, such as `query_timeout` or `max_concurrent_cache_jobs`, and a value under the `claim_ttl_secs` or `pending_refresh_interval_secs` floor are reported by the TOML parser at the offending key rather than by a per-field message.
 
 ### Fixed
 

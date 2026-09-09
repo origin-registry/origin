@@ -1,7 +1,7 @@
 pub mod link_plan;
 mod response;
 
-use std::slice;
+use std::{iter::once, slice};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -748,21 +748,14 @@ impl Registry {
         reference: &Reference,
         source_ts: Option<DateTime<Utc>>,
     ) -> Result<bool, Error> {
-        let Reference::Digest(digest) = reference else {
-            let existed_before = self
-                .manifest_delete_existed_before(resolved_repository, namespace, reference, &[])
-                .await;
-            let ops = self.plan_manifest_delete_ops(reference, &[]).await?;
-            self.metadata_store
-                .delete_links(namespace, &ops, source_ts)
-                .await?;
-            return Ok(existed_before);
+        let pointing_tags = match reference {
+            Reference::Digest(digest) => {
+                self.metadata_store
+                    .find_tags_pointing_at(namespace, digest)
+                    .await?
+            }
+            Reference::Tag(_) => Vec::new(),
         };
-
-        let pointing_tags = self
-            .metadata_store
-            .find_tags_pointing_at(namespace, digest)
-            .await?;
         let existed_before = self
             .manifest_delete_existed_before(
                 resolved_repository,
@@ -776,9 +769,18 @@ impl Registry {
             .await?;
         // The bytes are the collector's to reclaim once every reference is
         // stale; both delete endpoints answer `202 Accepted` regardless.
-        self.metadata_store
-            .delete_manifest(namespace, &ops, source_ts)
-            .await?;
+        match reference {
+            Reference::Digest(_) => {
+                self.metadata_store
+                    .delete_manifest(namespace, &ops, source_ts)
+                    .await?;
+            }
+            Reference::Tag(_) => {
+                self.metadata_store
+                    .delete_links(namespace, &ops, source_ts)
+                    .await?;
+            }
+        }
         Ok(existed_before)
     }
 
@@ -1134,26 +1136,12 @@ impl Registry {
         created_tags: &[Tag],
         digest: &Digest,
     ) {
-        let path_tag = reference.as_tag();
-        self.dispatch_replication(
-            repository,
-            namespace,
-            DispatchTarget::Push {
-                tag: path_tag,
-                digest,
-            },
-            None,
-        )
-        .await;
-
-        for tag in created_tags {
+        let tags = once(reference.as_tag()).chain(created_tags.iter().map(Some));
+        for tag in tags {
             self.dispatch_replication(
                 repository,
                 namespace,
-                DispatchTarget::Push {
-                    tag: Some(tag),
-                    digest,
-                },
+                DispatchTarget::Push { tag, digest },
                 None,
             )
             .await;

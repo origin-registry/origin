@@ -1,5 +1,3 @@
-use std::fmt;
-
 use cel_interpreter::SerializationError;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -26,7 +24,11 @@ pub enum PolicyDecision {
 }
 
 /// Describes why a policy evaluation produced an `Indeterminate` decision.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "access policy{} evaluation failed: {message}",
+    .rule_index.map_or(String::new(), |index| format!(" rule {index}"))
+)]
 pub struct PolicyError {
     /// 1-based index of the failing rule, or `None` when evaluation failed
     /// before any rule was reached (for example, context construction).
@@ -36,21 +38,6 @@ pub struct PolicyError {
     /// from identity or request fields.
     pub message: String,
 }
-
-impl fmt::Display for PolicyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.rule_index {
-            Some(idx) => write!(
-                f,
-                "access policy rule {idx} evaluation failed: {}",
-                self.message
-            ),
-            None => write!(f, "access policy evaluation failed: {}", self.message),
-        }
-    }
-}
-
-impl std::error::Error for PolicyError {}
 
 #[cfg(test)]
 mod tests {

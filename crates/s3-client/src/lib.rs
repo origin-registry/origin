@@ -45,36 +45,34 @@ impl Backend {
     /// (part size and copy chunk size both between 5 MiB and 5 GiB) are
     /// violated, or when the underlying HTTP client fails to initialise.
     pub fn new(config: &BackendConfig) -> Result<Self, Error> {
-        if config.multipart_part_size < ByteSize::mib(5) {
-            return Err(Error::Configuration(
-                "Multipart part size must be at least 5MiB".to_string(),
-            ));
-        }
-        if config.multipart_part_size > ByteSize::gib(5) {
-            return Err(Error::Configuration(
-                "Multipart part size must be at most 5GiB".to_string(),
-            ));
-        }
-        if config.multipart_copy_chunk_size > ByteSize::gib(5) {
-            return Err(Error::Configuration(
-                "Multipart copy chunk size must be at most 5GiB".to_string(),
-            ));
-        }
-        if config.multipart_copy_chunk_size < ByteSize::mib(5) {
-            return Err(Error::Configuration(
-                "Multipart copy chunk size must be at least 5MiB".to_string(),
-            ));
-        }
-
-        if config.circuit_breaker_threshold == 0 {
-            return Err(Error::Configuration(
-                "Circuit breaker threshold must be at least 1".to_string(),
-            ));
-        }
-        if config.operation_timeout_secs == 0 || config.operation_attempt_timeout_secs == 0 {
-            return Err(Error::Configuration(
-                "Operation timeouts must be at least 1 second".to_string(),
-            ));
+        let constraints = [
+            (
+                config.multipart_part_size >= ByteSize::mib(5),
+                "Multipart part size must be at least 5MiB",
+            ),
+            (
+                config.multipart_part_size <= ByteSize::gib(5),
+                "Multipart part size must be at most 5GiB",
+            ),
+            (
+                config.multipart_copy_chunk_size <= ByteSize::gib(5),
+                "Multipart copy chunk size must be at most 5GiB",
+            ),
+            (
+                config.multipart_copy_chunk_size >= ByteSize::mib(5),
+                "Multipart copy chunk size must be at least 5MiB",
+            ),
+            (
+                config.circuit_breaker_threshold > 0,
+                "Circuit breaker threshold must be at least 1",
+            ),
+            (
+                config.operation_timeout_secs > 0 && config.operation_attempt_timeout_secs > 0,
+                "Operation timeouts must be at least 1 second",
+            ),
+        ];
+        if let Some((_, message)) = constraints.iter().find(|(holds, _)| !holds) {
+            return Err(Error::Configuration((*message).to_string()));
         }
 
         let s3_client = client::S3Client::new(config)
@@ -127,7 +125,7 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::{ops::aggregate_batch_delete_errors, *};
+    use super::*;
     use crate::test_util::mock_config;
 
     fn test_config(overrides: impl FnOnce(&mut BackendConfig)) -> BackendConfig {
@@ -208,22 +206,5 @@ mod tests {
     fn test_full_key_with_prefix() {
         let backend = Backend::new(&test_config(|c| c.key_prefix = "prefix".to_string())).unwrap();
         assert_eq!(backend.full_key("test/file.txt"), "prefix/test/file.txt");
-    }
-
-    #[test]
-    fn test_aggregate_batch_delete_errors_joins_messages() {
-        let errors = vec!["first failure".to_string(), "second failure".to_string()];
-        let err =
-            aggregate_batch_delete_errors(&errors).expect("non-empty errors must produce IoError");
-        let msg = err.to_string();
-        assert!(msg.contains("batch delete errors:"), "got: {msg}");
-        assert!(msg.contains("first failure"), "got: {msg}");
-        assert!(msg.contains("second failure"), "got: {msg}");
-        assert!(msg.contains("; "), "got: {msg}");
-    }
-
-    #[test]
-    fn test_aggregate_batch_delete_errors_empty_returns_none() {
-        assert!(aggregate_batch_delete_errors(&[]).is_none());
     }
 }

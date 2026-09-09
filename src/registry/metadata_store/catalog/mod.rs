@@ -289,11 +289,9 @@ impl MetadataStore {
             // One content probe per name, fanned out but ordered so the
             // listing's lexical order survives.
             let probes = candidates.into_iter().map(|namespace| async move {
-                match self.has_manifest_content(&namespace).await {
-                    Ok(true) => Ok(Some(namespace)),
-                    Ok(false) => Ok(None),
-                    Err(e) => Err(e),
-                }
+                self.has_manifest_content(&namespace)
+                    .await
+                    .map(|has| has.then_some(namespace))
             });
             let mut probing = stream::iter(probes).buffered(self.namespace_walk_concurrency);
             while let Some(result) = probing.next().await {

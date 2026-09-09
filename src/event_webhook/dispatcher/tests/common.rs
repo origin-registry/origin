@@ -60,7 +60,7 @@ pub fn create_test_config(
         policy: DeliveryPolicy::Optional,
         token: None,
         timeout_ms: 5000,
-        max_retries: 0,
+        max_retries: Some(0),
         events,
         repository_filter,
     }
@@ -69,10 +69,10 @@ pub fn create_test_config(
 pub fn build_endpoint(config: EventWebhookConfig) -> WebhookEndpoint {
     WebhookEndpoint {
         client: Client::new(),
+        max_retries: config.max_retries(),
         url: config.url,
         policy: config.policy,
         token: config.token,
-        max_retries: config.max_retries,
         events: config.events,
         repository_filter: config.repository_filter,
     }
@@ -89,7 +89,7 @@ pub fn create_test_webhook_config(
         policy,
         token: token.map(|t| Secret::new(t.to_string())),
         timeout_ms: 5000,
-        max_retries,
+        max_retries: Some(max_retries),
         events: vec![EventKind::ManifestPush],
         repository_filter: None,
     }

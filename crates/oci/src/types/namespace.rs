@@ -1,13 +1,6 @@
-use std::{
-    borrow::Borrow,
-    fmt::{Display, Formatter},
-    ops::Deref,
-    str::FromStr,
-    sync::LazyLock,
-};
+use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::types::Error;
 
@@ -29,17 +22,12 @@ const MAX_NAMESPACE_LENGTH: usize = 255;
 pub struct Namespace(String);
 
 impl Namespace {
-    /// The single validation predicate shared by every constructor.
-    fn is_valid(s: &str) -> bool {
-        s.len() <= MAX_NAMESPACE_LENGTH && NAMESPACE_RE.is_match(s)
-    }
-
     /// # Errors
     ///
     /// Returns an error when `s` breaks the namespace grammar or exceeds the
     /// length cap.
     pub fn new(s: &str) -> Result<Self, Error> {
-        if Self::is_valid(s) {
+        if s.len() <= MAX_NAMESPACE_LENGTH && NAMESPACE_RE.is_match(s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(Error::InvalidNamespace(s.to_string()))
@@ -112,102 +100,7 @@ impl Namespace {
     }
 }
 
-impl FromStr for Namespace {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl TryFrom<String> for Namespace {
-    type Error = Error;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        if Self::is_valid(&s) {
-            Ok(Self(s))
-        } else {
-            Err(Error::InvalidNamespace(s))
-        }
-    }
-}
-
-impl TryFrom<&str> for Namespace {
-    type Error = Error;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl Display for Namespace {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for Namespace {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for Namespace {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Serialize for Namespace {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Namespace {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::try_from(s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl PartialEq<str> for Namespace {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl PartialEq<&str> for Namespace {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialEq<Namespace> for str {
-    fn eq(&self, other: &Namespace) -> bool {
-        self == other.0
-    }
-}
-
-impl PartialEq<Namespace> for &str {
-    fn eq(&self, other: &Namespace) -> bool {
-        *self == other.0
-    }
-}
-
-impl Borrow<str> for Namespace {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
+str_newtype!(Namespace);
 
 /// Returns `true` when `namespace` belongs to the configured `repository_name`,
 /// either as an exact match or as a direct sub-namespace of the form
@@ -225,6 +118,8 @@ pub fn namespace_belongs_to(namespace: &str, repository_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use crate::types::namespace::*;
 
     #[test]
@@ -271,9 +166,7 @@ mod tests {
     fn test_partial_eq_str() {
         let ns = Namespace::new("test-repo").unwrap();
         assert_eq!(ns, "test-repo");
-        assert_eq!("test-repo", ns);
         assert_ne!(ns, "other-repo");
-        assert_ne!("other-repo", ns);
     }
 
     #[test]

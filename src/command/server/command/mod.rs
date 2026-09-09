@@ -73,7 +73,7 @@ pub struct Command {
 
 impl Command {
     pub async fn new(config: &Configuration) -> Result<Command, Error> {
-        let auth_cache = bootstrap::auth_cache(&config.cache)?;
+        let auth_cache = config.cache.to_backend().map_err(bootstrap::Error::Cache)?;
         let BuiltRegistry {
             registry,
             depth_refresh,
@@ -118,7 +118,7 @@ impl Command {
     }
 
     pub async fn notify_config_change(&self, config: &Configuration) -> Result<(), Error> {
-        let auth_cache = bootstrap::auth_cache(&config.cache)?;
+        let auth_cache = config.cache.to_backend().map_err(bootstrap::Error::Cache)?;
         let BuiltRegistry {
             registry,
             depth_refresh,

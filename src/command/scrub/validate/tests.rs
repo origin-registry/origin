@@ -1402,7 +1402,7 @@ async fn a_tracked_reference_is_pinned_by_its_entry_alone() {
             .expect("the manifest body must stay readable");
         assert!(
             registry
-                .blob_ownership()
+                .metadata_store()
                 .can_read(namespace, &layer_digest)
                 .await
                 .unwrap(),

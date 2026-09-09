@@ -29,7 +29,6 @@ use crate::{
     jobs::store::{ClaimMode, JobStore},
     registry::{
         Registry, RegistryConfig, Repository,
-        blob_ownership::BlobOwnership,
         metadata_store::LinkKind,
         repository_resolver::RepositoryResolver,
         test_utils::{
@@ -41,7 +40,6 @@ use crate::{
     },
     replication::{
         REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
-        ReplicationMode,
     },
 };
 
@@ -69,7 +67,7 @@ impl FsRegistryFixture {
             policy: DeliveryPolicy::Required,
             token: None,
             timeout_ms: 5_000,
-            max_retries: 0,
+            max_retries: Some(0),
             events: kinds,
             repository_filter: None,
         };
@@ -565,7 +563,10 @@ async fn mount_emits_blob_push_event() {
 
     let digest =
         put_blob_direct(fixture.registry.metadata_store.object_store(), b"mountable").await;
-    BlobOwnership::new(fixture.registry.metadata_store.as_ref())
+    fixture
+        .registry
+        .metadata_store
+        .as_ref()
         .grant(source, &digest)
         .await
         .unwrap();
@@ -725,15 +726,11 @@ impl ReplicationFixture {
 fn mirror_and_additive_downstreams() -> Vec<ReplicationDownstream> {
     let client = downstream_client("https://unused.test");
     vec![
-        ReplicationDownstream::builder("mirror".to_string(), client.clone(), 4)
-            .mode(ReplicationMode::EventReconcile)
-            .namespace_filter(Vec::new())
-            .prune(true)
-            .build(),
-        ReplicationDownstream::builder("additive".to_string(), client, 4)
-            .mode(ReplicationMode::EventReconcile)
-            .namespace_filter(Vec::new())
-            .build(),
+        ReplicationDownstream {
+            prune: true,
+            ..ReplicationDownstream::new("mirror".to_string(), client.clone(), 4)
+        },
+        ReplicationDownstream::new("additive".to_string(), client, 4),
     ]
 }
 

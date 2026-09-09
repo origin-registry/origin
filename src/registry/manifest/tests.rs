@@ -34,7 +34,6 @@ use crate::{
     metrics_provider,
     registry::{
         Error, Registry,
-        blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody, tag_ord},
         repository::Config as RepositoryConfig,
         test_utils::{
@@ -672,7 +671,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
         .await
         .expect("permissive registry accepts a push referencing unowned blobs");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(ownership.can_read(&owner, &layer_digest).await.unwrap());
     assert!(ownership.can_read(&owner, &config_digest).await.unwrap());
     assert!(
@@ -724,7 +723,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
         .await
         .expect("permissive registry accepts an index referencing an unowned child manifest");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(ownership.can_read(&owner, &child_digest).await.unwrap());
     assert!(
         !ownership.can_read(&attacker, &child_digest).await.unwrap(),
@@ -784,7 +783,7 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
         .await
         .expect("permissive registry accepts a push referencing owned blobs");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(
         ownership
             .can_read(&namespace, &config_digest)
@@ -1456,7 +1455,7 @@ async fn delete_manifest_leaves_bytes_for_the_collector() {
         let digest = response.digest.clone();
 
         // A second repo holds a reference; the delete must not touch the bytes.
-        let ownership = BlobOwnership::new(registry.metadata_store.as_ref());
+        let ownership = registry.metadata_store.as_ref();
         ownership.grant(second, &digest).await.unwrap();
         let reference = Reference::Digest(digest.clone());
         registry
@@ -1642,7 +1641,7 @@ async fn delete_manifest_then_delete_uploaded_blobs() {
             .unwrap();
 
         // Ownership revoked; the stale entries and the bytes wait for the collector.
-        let ownership = registry.blob_ownership();
+        let ownership = registry.metadata_store();
         for digest in [&layer_digest, &config_digest] {
             let refs = ownership.references(namespace, digest).await.unwrap();
             assert!(
@@ -2911,7 +2910,7 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
 
     let manifest_digest = Digest::sha256_of_bytes(b"granted-manifest");
     let layer_digest = Digest::sha256_of_bytes(b"granted-layer");
-    BlobOwnership::new(&store)
+    store
         .grant(&namespace, &layer_digest)
         .await
         .expect("seed the layer's ownership grant");
@@ -4243,14 +4242,15 @@ mod dispatch_replication_tests {
         mode: ReplicationMode,
         namespace_filter: Vec<Regex>,
     ) -> ReplicationDownstream {
-        ReplicationDownstream::builder(
-            name.to_string(),
-            downstream_client("https://unused.test"),
-            4,
-        )
-        .mode(mode)
-        .namespace_filter(namespace_filter)
-        .build()
+        ReplicationDownstream {
+            mode,
+            namespace_filter,
+            ..ReplicationDownstream::new(
+                name.to_string(),
+                downstream_client("https://unused.test"),
+                4,
+            )
+        }
     }
 
     fn repository_with(mode: ReplicationMode, namespace_filter: Vec<Regex>) -> Repository {

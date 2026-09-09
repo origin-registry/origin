@@ -6,7 +6,7 @@ use chrono::Utc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_storage::Error as StorageError;
 use angos_storage::ObjectStore;
 
@@ -26,7 +26,7 @@ use crate::{
     jobs::{JobState, Queue},
     registry::{
         Error as RegistryError, Registry,
-        blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
+        blob_store::BlobStore,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
     },
     replication::{
@@ -443,13 +443,6 @@ impl Executor {
         }
     }
 
-    /// Reclaim an upload-only namespace whose name fails `Namespace` validation
-    /// by removing its upload subtree from the blob store.
-    async fn delete_invalid_upload_namespace(&self, name: String) -> Result<(), Error> {
-        self.blob_store.delete_namespace_directory(&name).await?;
-        Ok(())
-    }
-
     /// Retention orphan-manifest deletion through the registry's standard
     /// delete path, which also reclaims the manifest's bytes once unreferenced.
     /// Age-gated like [`Self::delete_orphan_blob`]: every producer of this
@@ -486,17 +479,6 @@ impl Executor {
         Ok(())
     }
 
-    async fn delete_expired_upload(
-        &self,
-        namespace: Namespace,
-        session_id: UploadSessionId,
-    ) -> Result<(), Error> {
-        self.blob_store
-            .delete_upload(&namespace, &session_id)
-            .await?;
-        Ok(())
-    }
-
     async fn delete_orphan_referrer(
         &self,
         namespace: Namespace,
@@ -511,13 +493,6 @@ impl Executor {
                     referrer,
                 })],
             )
-            .await?;
-        Ok(())
-    }
-
-    async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
-        self.blob_store
-            .abort_orphan_multipart_upload(&upload)
             .await?;
         Ok(())
     }
@@ -599,10 +574,8 @@ impl Executor {
     ) -> Result<(), Error> {
         let store = self.metadata_store.object_store();
         let pending = job_pending_path(queue.as_str(), &storage_key);
-        match store.head(&pending).await {
-            Ok(_) => return Ok(()),
-            Err(StorageError::NotFound) => {}
-            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        if store.exists(&pending).await.map_err(RegistryError::from)? {
+            return Ok(());
         }
         match self.key_younger_than_grace(store.as_ref(), &key).await? {
             None => Ok(()),
@@ -694,16 +667,24 @@ impl ActionSink for Executor {
                 tag,
                 entry_name,
             } => self.demote_tag_entry(namespace, tag, entry_name).await,
-            Action::DeleteInvalidUploadNamespace { name } => {
-                self.delete_invalid_upload_namespace(name).await
-            }
+            // An upload-only namespace whose name fails `Namespace` validation
+            // is reclaimed by removing its upload subtree from the blob store.
+            Action::DeleteInvalidUploadNamespace { name } => self
+                .blob_store
+                .delete_namespace_directory(&name)
+                .await
+                .map_err(Error::from),
             Action::DeleteOrphanManifest { namespace, digest } => {
                 self.delete_orphan_manifest(namespace, digest).await
             }
             Action::DeleteExpiredUpload {
                 namespace,
                 session_id,
-            } => self.delete_expired_upload(namespace, session_id).await,
+            } => self
+                .blob_store
+                .delete_upload(&namespace, &session_id)
+                .await
+                .map_err(Error::from),
             Action::DeleteOrphanReferrer {
                 namespace,
                 subject,
@@ -712,7 +693,11 @@ impl ActionSink for Executor {
                 self.delete_orphan_referrer(namespace, subject, referrer)
                     .await
             }
-            Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
+            Action::AbortMultipartUpload { upload } => self
+                .blob_store
+                .abort_orphan_multipart_upload(&upload)
+                .await
+                .map_err(Error::from),
             Action::EnqueueReplicationPush {
                 downstream,
                 namespace,
@@ -758,7 +743,7 @@ mod tests {
     use chrono::{DateTime, TimeDelta};
     use tempfile::TempDir;
 
-    use angos_oci::Digest;
+    use angos_oci::{Digest, UploadSessionId};
     use angos_storage::fs::Backend as StorageFsBackend;
 
     use crate::command::maintenance::executor::*;
@@ -1580,7 +1565,8 @@ mod tests {
         let payload = CacheFetchBlobPayload {
             namespace: Namespace::new("ns/app").unwrap(),
             digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(),
+                .parse()
+                .unwrap(),
         };
         JobEnvelope::new(
             Queue::Cache,

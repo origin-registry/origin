@@ -7,20 +7,11 @@ use crate::registry::{blob_store, s3_connection::S3ConnectionConfig};
 // Unknown keys in any sub-table are ignored (serde's default), so a config
 // carrying knobs angos does not read still loads.
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct MetadataFsConfig {
     pub root_dir: PathBuf,
     #[serde(default)]
     pub sync_to_disk: bool,
-}
-
-impl Default for MetadataFsConfig {
-    fn default() -> Self {
-        Self {
-            root_dir: PathBuf::new(),
-            sync_to_disk: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

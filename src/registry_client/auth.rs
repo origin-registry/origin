@@ -1,9 +1,6 @@
 //! WWW-Authenticate header parsing, bearer-token negotiation, and auth-token cache keys.
 
-use std::sync::LazyLock;
-
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use regex::Regex;
 use reqwest::{
     Response,
     header::{AUTHORIZATION, WWW_AUTHENTICATE},
@@ -58,11 +55,6 @@ pub fn token_index_cache_key(url: &Url, username: Option<&str>) -> Result<String
     ))
 }
 
-/// `None` only if the literal pattern were malformed; the challenge parser
-/// then degrades to "no bearer challenge" instead of panicking.
-static BEARER_PARAM_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r#"(\w+)="([^"]+)""#).ok());
-
 #[derive(Clone, Debug, Deserialize)]
 struct BearerToken {
     token: Option<String>,
@@ -116,17 +108,32 @@ impl BearerChallenge {
     }
 }
 
+/// The `key="value"` parameters of a bearer challenge. A value may itself
+/// hold commas (`scope="repository:x:pull,push"`), so the scan follows the
+/// quotes instead of splitting on them.
+fn challenge_params(mut params: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    while let Some((key, rest)) = params.split_once("=\"") {
+        let Some((value, rest)) = rest.split_once('"') else {
+            break;
+        };
+        let key = key.trim_start_matches([',', ' ']);
+        if !key.is_empty() && !value.is_empty() {
+            pairs.push((key.to_string(), value.to_string()));
+        }
+        params = rest;
+    }
+    pairs
+}
+
 fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
-    let bearer_params = header.strip_prefix("Bearer ")?;
     let mut realm: Option<String> = None;
     let mut other: Vec<(String, String)> = Vec::new();
-    for cap in BEARER_PARAM_RE.as_ref()?.captures_iter(bearer_params) {
-        let k = cap[1].to_string();
-        let v = cap[2].to_string();
-        if k == "realm" {
-            realm = Some(v);
+    for (key, value) in challenge_params(header.strip_prefix("Bearer ")?) {
+        if key == "realm" {
+            realm = Some(value);
         } else {
-            other.push((k, v));
+            other.push((key, value));
         }
     }
     Some(BearerChallenge {

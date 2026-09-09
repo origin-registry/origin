@@ -42,10 +42,8 @@ pub mod test_fixtures;
 fn set_tracing(
     config: Option<ObservabilityConfig>,
 ) -> Result<Option<SdkTracerProvider>, configuration::Error> {
-    if let Some(ObservabilityConfig {
-        tracing: Some(tracing_config),
-    }) = config
-    {
+    let tracing_config = config.and_then(|config| config.tracing);
+    let provider = if let Some(tracing_config) = tracing_config {
         let resource = Resource::builder()
             .with_service_name(env!("CARGO_PKG_NAME"))
             .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
@@ -70,27 +68,25 @@ fn set_tracing(
             ))
             .build();
 
-        let tracer = tracer_provider.tracer("angos");
         // Clone before registering globally so the caller retains a handle to shut
         // down the batch exporter and flush in-flight spans before the process exits.
         global::set_tracer_provider(tracer_provider.clone());
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        let _ = tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
-            .with(tracing_subscriber::fmt::layer().json())
-            .with(telemetry)
-            .try_init();
-
-        Ok(Some(tracer_provider))
+        Some(tracer_provider)
     } else {
-        let _ = tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
-            .with(tracing_subscriber::fmt::layer().json())
-            .try_init();
+        None
+    };
 
-        Ok(None)
-    }
+    // An absent layer is a no-op in the stack.
+    let telemetry = provider
+        .as_ref()
+        .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer("angos")));
+    let _ = tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer().json())
+        .with(telemetry)
+        .try_init();
+
+    Ok(provider)
 }
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";

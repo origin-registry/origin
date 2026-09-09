@@ -169,7 +169,8 @@ impl MetadataStore {
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(e.into()),
         }
-        self.put_gc_run(claim).await?;
+        let body = self.gc_run_body(claim)?;
+        self.object_store().put(&claim.key, body).await?;
         Ok(true)
     }
 
@@ -181,14 +182,6 @@ impl MetadataStore {
             &claim,
             Utc::now() + Duration::milliseconds(RELEASE_LINGER_MS),
         )?;
-        self.object_store()
-            .put(&claim.key, body)
-            .await
-            .map_err(Error::from)
-    }
-
-    async fn put_gc_run(&self, claim: &GcClaim) -> Result<(), Error> {
-        let body = self.gc_run_body(claim)?;
         self.object_store()
             .put(&claim.key, body)
             .await

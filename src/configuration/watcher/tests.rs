@@ -750,7 +750,7 @@ async fn a_refused_configuration_is_not_cached() {
         "a refused configuration must not be cached"
     );
     assert!(
-        matches!(dirs, TlsDirs::Unchanged),
+        !dirs,
         "the watched TLS directories must keep describing the configuration in effect"
     );
 }

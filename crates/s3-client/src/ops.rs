@@ -11,7 +11,7 @@
 //! "collect-the-whole-thing" wrappers stream into a single `Bytes` allocation
 //! sized from the `Content-Length` header so there is no resize churn.
 
-use std::{future::ready, io, time::Duration};
+use std::{io, time::Duration};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -43,8 +43,9 @@ pub struct GetObjectResult {
     pub content_length: u64,
 }
 
-/// A single completed part of a multipart upload.
+/// A single completed part of a multipart upload, named as `ListParts` lists it.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub struct UploadedPart {
     pub part_number: u32,
     pub e_tag: String,
@@ -366,8 +367,11 @@ impl Backend {
             .into_iter()
             .map(|e| e.message.unwrap_or_else(|| "unspecified".to_string()))
             .collect();
-        if let Some(err) = aggregate_batch_delete_errors(&errors) {
-            return Err(err);
+        if !errors.is_empty() {
+            return Err(Error::Io(format!(
+                "batch delete errors: {}",
+                errors.join("; ")
+            )));
         }
         Ok(())
     }
@@ -757,10 +761,6 @@ impl Backend {
 // presigned URLs
 
 impl Backend {
-    #[allow(
-        clippy::unused_async,
-        reason = "async signature matches the rest of the Backend public surface"
-    )]
     /// # Errors
     /// Returns [`Error::Io`] when `SigV4` signing fails (e.g.
     /// invalid credential characters); no network call is made.
@@ -769,13 +769,11 @@ impl Backend {
         path: &str,
         expires_in: Duration,
         response_content_type: Option<&str>,
-    ) -> impl Future<Output = Result<String, Error>> {
+    ) -> Result<String, Error> {
         let key = self.full_key(path);
-        ready(
-            self.s3_client
-                .presigned_get_url(&key, expires_in, response_content_type)
-                .map_err(|e| Error::Io(e.to_string())),
-        )
+        self.s3_client
+            .presigned_get_url(&key, expires_in, response_content_type)
+            .map_err(|e| Error::Io(e.to_string()))
     }
 }
 
@@ -808,58 +806,36 @@ impl S3Request {
     }
 }
 
-pub fn aggregate_batch_delete_errors(errors: &[String]) -> Option<Error> {
-    (!errors.is_empty()).then(|| Error::Io(format!("batch delete errors: {}", errors.join("; "))))
-}
-
 struct CopyPartRange {
     part_number: u32,
     start: u64,
     end: u64,
 }
 
-struct CopyPartRanges {
+/// The inclusive byte ranges of a multipart copy, one per part.
+fn copy_part_ranges(
     size: u64,
     chunk_size: u64,
-    start: u64,
-    part_number: u32,
-}
-
-fn copy_part_ranges(size: u64, chunk_size: u64) -> Result<CopyPartRanges, Error> {
+) -> Result<impl Iterator<Item = CopyPartRange>, Error> {
     if chunk_size == 0 {
         return Err(Error::Io(
             "multipart copy chunk size must be greater than 0".to_string(),
         ));
     }
-    if size.div_ceil(chunk_size) > u64::from(MAX_MULTIPART_COPY_PARTS) {
+    let parts = size.div_ceil(chunk_size);
+    if parts > u64::from(MAX_MULTIPART_COPY_PARTS) {
         return Err(Error::Io(format!(
             "multipart copy requires more than {MAX_MULTIPART_COPY_PARTS} parts"
         )));
     }
-    Ok(CopyPartRanges {
-        size,
-        chunk_size,
-        start: 0,
-        part_number: 1,
-    })
-}
-
-impl Iterator for CopyPartRanges {
-    type Item = CopyPartRange;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.start >= self.size {
-            return None;
+    Ok((0..parts).map(move |index| {
+        let start = index * chunk_size;
+        CopyPartRange {
+            part_number: u32::try_from(index + 1).unwrap_or(u32::MAX),
+            start,
+            end: start.saturating_add(chunk_size).min(size) - 1,
         }
-        let end = self.start.saturating_add(self.chunk_size).min(self.size) - 1;
-        let range = CopyPartRange {
-            part_number: self.part_number,
-            start: self.start,
-            end,
-        };
-        self.start = end + 1;
-        self.part_number += 1;
-        Some(range)
-    }
+    }))
 }
 
 /// Map an S3 transport or protocol error to the typed [`Error`]: a 404 to

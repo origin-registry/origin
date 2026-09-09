@@ -64,7 +64,7 @@ fn policies_retain(global: &PolicyDecision, repo: &PolicyDecision) -> bool {
     )
 }
 
-fn check_global_policy(
+fn check_policy(
     policy: Option<&RetentionPolicy>,
     manifest: &ManifestImage,
     last_pushed: &[String],
@@ -73,33 +73,19 @@ fn check_global_policy(
     let Some(policy) = policy else {
         return Ok(PolicyDecision::NoOpinion);
     };
-    if policy.should_retain(manifest, last_pushed, last_pulled)? {
-        Ok(PolicyDecision::Retain)
-    } else {
-        Ok(PolicyDecision::Delete)
-    }
+    Ok(
+        if policy.should_retain(manifest, last_pushed, last_pulled)? {
+            PolicyDecision::Retain
+        } else {
+            PolicyDecision::Delete
+        },
+    )
 }
 
-fn check_repo_policy(
-    repository: Option<&Repository>,
-    manifest: &ManifestImage,
-    last_pushed: &[String],
-    last_pulled: &[String],
-) -> Result<PolicyDecision, Error> {
-    let Some(repo) = repository else {
-        return Ok(PolicyDecision::NoOpinion);
-    };
-    if !repo.retention_policy.has_rules() {
-        return Ok(PolicyDecision::NoOpinion);
-    }
-    if repo
-        .retention_policy
-        .should_retain(manifest, last_pushed, last_pulled)?
-    {
-        Ok(PolicyDecision::Retain)
-    } else {
-        Ok(PolicyDecision::Delete)
-    }
+/// The repository's own retention policy, when it declares rules.
+fn repository_policy(repository: Option<&Repository>) -> Option<&RetentionPolicy> {
+    let policy = &repository?.retention_policy;
+    policy.has_rules().then_some(policy)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -128,8 +114,13 @@ fn decide_orphan_fate(
         return Ok(Fate::Skip);
     };
 
-    let global = check_global_policy(global_policy, manifest, last_pushed, last_pulled)?;
-    let repo = check_repo_policy(repository, manifest, last_pushed, last_pulled)?;
+    let global = check_policy(global_policy, manifest, last_pushed, last_pulled)?;
+    let repo = check_policy(
+        repository_policy(repository),
+        manifest,
+        last_pushed,
+        last_pulled,
+    )?;
 
     Ok(if policies_retain(&global, &repo) {
         Fate::Retain
@@ -244,8 +235,8 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
         {
             continue;
         }
-        let global = check_global_policy(ctx.global_policy, &subject, &[], &[])?;
-        let repo = check_repo_policy(repository, &subject, &[], &[])?;
+        let global = check_policy(ctx.global_policy, &subject, &[], &[])?;
+        let repo = check_policy(repository_policy(repository), &subject, &[], &[])?;
         if policies_retain(&global, &repo) {
             continue;
         }
@@ -281,7 +272,8 @@ impl NamespaceChecker for RetentionChecker {
         debug!("Checking retention policies on '{namespace}'");
 
         let tag_metadata = self.fetch_tag_metadata(namespace).await?;
-        let (last_pushed, last_pulled) = Self::build_sorted_rankings(&tag_metadata);
+        let last_pushed = Self::rank_by(&tag_metadata, |t| t.metadata.created_at);
+        let last_pulled = Self::rank_by(&tag_metadata, |t| t.pulled_at);
 
         let tags = self.get_deletable_tags(namespace, &tag_metadata, &last_pushed, &last_pulled);
         self.emit_delete_tags(namespace, &tags, sink).await?;
@@ -319,12 +311,6 @@ impl RetentionChecker {
             .try_buffered(TAG_METADATA_CONCURRENCY)
             .try_collect()
             .await
-    }
-
-    fn build_sorted_rankings(tags: &[TagWithMetadata]) -> (Vec<String>, Vec<String>) {
-        let last_pushed = Self::rank_by(tags, |t| t.metadata.created_at);
-        let last_pulled = Self::rank_by(tags, |t| t.pulled_at);
-        (last_pushed, last_pulled)
     }
 
     /// Ranks tags most recent first, leaving out those carrying no such time.
@@ -406,34 +392,23 @@ impl RetentionChecker {
             tag.pulled_at,
             Utc::now(),
         );
-
-        self.evaluate_retention_policies(namespace, &tag.name, &manifest, last_pushed, last_pulled)
-    }
-
-    fn evaluate_retention_policies(
-        &self,
-        namespace: &Namespace,
-        tag: &Tag,
-        manifest: &ManifestImage,
-        last_pushed: &[String],
-        last_pulled: &[String],
-    ) -> Result<bool, Error> {
-        let global = check_global_policy(
+        let global = check_policy(
             self.global_retention_policy.as_deref(),
-            manifest,
+            &manifest,
             last_pushed,
             last_pulled,
         )?;
-        let repo = check_repo_policy(
-            self.resolver.resolve(namespace),
-            manifest,
+        let repo = check_policy(
+            repository_policy(self.resolver.resolve(namespace)),
+            &manifest,
             last_pushed,
             last_pulled,
         )?;
 
         let retain = policies_retain(&global, &repo);
         debug!(
-            "Retention verdict for {namespace}:{tag}: global={global:?} repo={repo:?} retain={retain}"
+            "Retention verdict for {namespace}:{}: global={global:?} repo={repo:?} retain={retain}",
+            tag.name
         );
         Ok(retain)
     }
@@ -799,7 +774,8 @@ mod tests {
             tag_with_times("new", Some(t3), None),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed[0], "new");
         assert_eq!(last_pushed[1], "old");
@@ -818,7 +794,8 @@ mod tests {
             tag_with_times("pulled", Some(pushed), Some(pulled)),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed.len(), 2);
         assert_eq!(last_pulled, vec!["pulled".to_string()]);
@@ -834,7 +811,8 @@ mod tests {
             tag_with_times("b", Some(pushed_time), Some(pulled_time)),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed[0], "a");
         assert_eq!(last_pulled[0], "b");
@@ -1245,7 +1223,7 @@ mod tests {
             policy: DeliveryPolicy::Required,
             token: None,
             timeout_ms: 5_000,
-            max_retries: 0,
+            max_retries: Some(0),
             events: vec![EventKind::ManifestDelete, EventKind::TagDelete],
             repository_filter: None,
         };
@@ -1412,7 +1390,7 @@ mod tests {
     #[test]
     fn check_global_policy_returns_no_opinion_when_policy_absent() {
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(None, &manifest, &[], &[]).unwrap();
+        let result = check_policy(None, &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1425,7 +1403,7 @@ mod tests {
             Arc::new(SystemClock),
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(Some(&policy), &manifest, &[], &[]).unwrap();
+        let result = check_policy(Some(&policy), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Retain);
     }
 
@@ -1438,7 +1416,7 @@ mod tests {
             Arc::new(SystemClock),
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(Some(&policy), &manifest, &[], &[]).unwrap();
+        let result = check_policy(Some(&policy), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Delete);
     }
 
@@ -1460,7 +1438,7 @@ mod tests {
     #[test]
     fn check_repo_policy_returns_no_opinion_when_repository_absent() {
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(None, &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(None), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1468,7 +1446,7 @@ mod tests {
     fn check_repo_policy_returns_no_opinion_when_repo_has_no_rules() {
         let repo = make_repo("r", vec![]);
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1476,7 +1454,7 @@ mod tests {
     fn check_repo_policy_returns_retain_when_repo_policy_keeps() {
         let repo = make_repo("r", vec![CelRule::compile("image.tag == 'v1'").unwrap()]);
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Retain);
     }
 
@@ -1487,7 +1465,7 @@ mod tests {
             vec![CelRule::compile("image.tag == 'keep-me'").unwrap()],
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Delete);
     }
 

@@ -8,7 +8,7 @@
 
 use std::{
     borrow::Cow,
-    fmt::{self, Debug, Display, Formatter, Write},
+    fmt::{self, Debug, Display, Formatter},
     future::Future,
     io,
     sync::Arc,
@@ -284,8 +284,7 @@ struct RequestTarget {
 
 struct EncodedQueryParam {
     name: String,
-    value: String,
-    has_value: bool,
+    value: Option<String>,
 }
 
 impl S3Client {
@@ -661,18 +660,8 @@ impl S3Client {
         canonical_request: &str,
     ) -> Result<String, S3Error> {
         let canonical_hash = hex_sha256(canonical_request.as_bytes());
-        let mut string_to_sign = String::with_capacity(
-            SIGNING_ALGORITHM.len()
-                + amz_date.len()
-                + credential_scope.len()
-                + canonical_hash.len()
-                + 3,
-        );
-        // Writing to a `String` is infallible; discard the always-`Ok` result.
-        let _ = write!(
-            string_to_sign,
-            "{SIGNING_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}"
-        );
+        let string_to_sign =
+            format!("{SIGNING_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}");
         let signing_key = self.signing_key(date)?;
         Ok(hex::encode(hmac_sha256(
             &signing_key,
@@ -782,27 +771,9 @@ fn build_canonical_request(
     signed_headers: &str,
     payload_hash: &str,
 ) -> String {
-    let mut out = String::with_capacity(
-        method.len()
-            + canonical_uri.len()
-            + canonical_query.len()
-            + canonical_headers.len()
-            + signed_headers.len()
-            + payload_hash.len()
-            + 5,
-    );
-    out.push_str(method);
-    out.push('\n');
-    out.push_str(canonical_uri);
-    out.push('\n');
-    out.push_str(canonical_query);
-    out.push('\n');
-    out.push_str(canonical_headers);
-    out.push('\n');
-    out.push_str(signed_headers);
-    out.push('\n');
-    out.push_str(payload_hash);
-    out
+    format!(
+        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    )
 }
 
 fn canonical_headers(headers: &HeaderMap) -> Result<(String, String), S3Error> {
@@ -821,30 +792,21 @@ fn canonical_headers(headers: &HeaderMap) -> Result<(String, String), S3Error> {
     }
     values.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut canonical = String::new();
-    let mut signed = String::new();
-    for (index, (name, value)) in values.into_iter().enumerate() {
-        canonical.push_str(&name);
-        canonical.push(':');
-        canonical.push_str(&value);
-        canonical.push('\n');
-        if index > 0 {
-            signed.push(';');
-        }
-        signed.push_str(&name);
-    }
+    let canonical = values
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let signed = values
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
     Ok((canonical, signed))
 }
 
 fn normalize_header_value(value: &str) -> String {
-    let mut normalized = String::with_capacity(value.len());
-    for part in value.split_whitespace() {
-        if !normalized.is_empty() {
-            normalized.push(' ');
-        }
-        normalized.push_str(part);
-    }
-    normalized
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn encode_query(query: &[QueryParam]) -> Vec<EncodedQueryParam> {
@@ -852,12 +814,7 @@ fn encode_query(query: &[QueryParam]) -> Vec<EncodedQueryParam> {
         .iter()
         .map(|param| EncodedQueryParam {
             name: aws_uri_encode(&param.name, true),
-            value: param
-                .value
-                .as_deref()
-                .map(|v| aws_uri_encode(v, true))
-                .unwrap_or_default(),
-            has_value: param.value.is_some(),
+            value: param.value.as_deref().map(|v| aws_uri_encode(v, true)),
         })
         .collect()
 }
@@ -865,31 +822,28 @@ fn encode_query(query: &[QueryParam]) -> Vec<EncodedQueryParam> {
 fn canonical_query(query: &[EncodedQueryParam]) -> String {
     let mut params = query.iter().collect::<Vec<_>>();
     params.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
-    let mut encoded = String::new();
-    for (index, param) in params.into_iter().enumerate() {
-        if index > 0 {
-            encoded.push('&');
-        }
-        encoded.push_str(&param.name);
-        encoded.push('=');
-        encoded.push_str(&param.value);
-    }
-    encoded
+    params
+        .iter()
+        .map(|param| {
+            format!(
+                "{}={}",
+                param.name,
+                param.value.as_deref().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn url_query(query: &[EncodedQueryParam]) -> String {
-    let mut encoded = String::new();
-    for (index, param) in query.iter().enumerate() {
-        if index > 0 {
-            encoded.push('&');
-        }
-        encoded.push_str(&param.name);
-        if param.has_value {
-            encoded.push('=');
-            encoded.push_str(&param.value);
-        }
-    }
-    encoded
+    query
+        .iter()
+        .map(|param| match &param.value {
+            Some(value) => format!("{}={value}", param.name),
+            None => param.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn aws_uri_encode(input: &str, encode_slash: bool) -> String {
