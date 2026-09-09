@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A retention tag deletion re-reads the tag and skips it when it points somewhere else by then, so a re-push landing between the policy snapshot and the delete is no longer swept away.
 - The in-flight window that shields a push from the grant sweep is measured on the ownership grant rather than on the bytes it names, so a cross-repository mount of an old blob is no longer revoked mid-push.
 - A finished reclamation run expires its `v2/gc/` marker a few seconds after the delete instead of removing it at once, so a push whose reference landed after the run's last liveness check backs off rather than committing a manifest onto reclaimed bytes.
+- `sync_to_disk = true` now covers uploaded blob bytes, which were only flushed to the page cache, so a power loss can no longer leave a manifest pointing at a truncated blob.
 
 ## 1.7.1
 

@@ -3,7 +3,7 @@ use futures_util::TryStreamExt;
 use tempfile::TempDir;
 
 use crate::tests::object_store_conformance;
-use crate::{ObjectStore, fs::Backend};
+use crate::{ObjectStore, fs::Backend, test_util::frame};
 
 fn backend(dir: &TempDir) -> Backend {
     Backend::builder(dir.path()).build()
@@ -352,4 +352,24 @@ async fn list_all_walks_the_whole_tree_once() {
     let mut keys: Vec<String> = store.list_all("w/").try_collect().await.unwrap();
     keys.sort();
     assert_eq!(keys, ["a.txt", "a/x", "a/y", "b/c/d", "z"]);
+}
+
+/// The durability flag reaches the upload path, which wrote bytes no `fsync`
+/// covered. A crash is not reproducible here, so this pins that enabling it
+/// leaves the upload working rather than that the bytes reached the platter.
+#[tokio::test]
+async fn an_upload_round_trips_with_durability_enabled() {
+    let dir = TempDir::new().unwrap();
+    let store = Backend::builder(dir.path()).sync_to_disk(true).build();
+    let body = Bytes::from_static(b"durable bytes");
+
+    store.create_upload("up/synced").await.unwrap();
+    let written = store
+        .write_upload("up/synced", frame(body.clone()), Some(body.len() as u64))
+        .await
+        .unwrap();
+    store.complete_upload("up/synced").await.unwrap();
+
+    assert_eq!(written, body.len() as u64);
+    assert_eq!(store.get("up/synced").await.unwrap(), body);
 }

@@ -118,7 +118,7 @@ root_dir = "/data"
 sync_to_disk = true  # fsync after writes
 ```
 
-- `sync_to_disk = true`: Every write is flushed to disk with `fsync()`, guaranteeing durability at the cost of higher write latency.
+- `sync_to_disk = true`: Every object's bytes are fsynced before the object becomes visible, uploads included, at the cost of higher write latency. Directory entries are not fsynced, so a crash can still lose the last rename on a filesystem that does not order them.
 - `sync_to_disk = false` (default): Relies on OS page cache for better performance. Acceptable when the underlying storage already provides durability guarantees (e.g., battery-backed RAID, ZFS, cloud block storage with replication). Without such guarantees, data may be lost on crash or power failure.
 
 ---

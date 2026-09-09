@@ -615,6 +615,11 @@ impl ObjectStore for Backend {
             )));
         }
         file.flush().await?;
+        // The bytes are the object: a manifest committed over an upload the
+        // page cache had not written back would name a truncated blob.
+        if self.sync_to_disk {
+            file.sync_all().await?;
+        }
         current
             .checked_add(written)
             .ok_or_else(|| Error::Backend("upload size overflow".to_string()))
