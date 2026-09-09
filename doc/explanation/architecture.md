@@ -243,6 +243,13 @@ Lock-free across any number of replicas: registry metadata is write-once and
 ordered, blob reclamation is fenced by the `v2/gc/` run-marker protocol, and
 the durable job queue serialises workers with atomically created claim keys.
 
+Tag order is timestamp order, so **replicas sharing a backend need
+synchronized clocks** (NTP or equivalent). A locally authored entry is floored
+one millisecond above the entry it supersedes, which keeps each replica's own
+writes winning against a peer whose clock runs ahead; skew still decides which
+of two concurrent pushes from different replicas wins, and it still shifts the
+times reported for a tag.
+
 ---
 
 ## Security Design

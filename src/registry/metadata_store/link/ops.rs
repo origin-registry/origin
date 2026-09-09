@@ -24,7 +24,7 @@ use crate::registry::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
         blob_index::{namespace_ref_entries, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
-        link::tag::{TagEntryBody, tag_del_mutation, tag_set_mutation},
+        link::tag::{TagEntryBody, local_entry_ts, tag_del_mutation, tag_set_mutation},
         mutation::Mutation,
     },
 };
@@ -656,14 +656,15 @@ fn build_create_mutations(
 
             // A same-digest re-push keeps the existing `created_at`: bumping
             // it would let an interleaved peer write lose locally yet win on
-            // peers.
-            let created_at = if same_target {
-                link_cache.get(*link).and_then(|m| m.created_at)
-            } else {
-                None
-            }
-            .or(tx.created_at())
-            .unwrap_or_else(Utc::now);
+            // peers. A replicated write carries its author's time. Anything
+            // else is local, and stamps this replica's clock floored above the
+            // entry it supersedes. Only a tag has one to supersede: a revision
+            // or referrer always re-creates its own target, so it takes the
+            // branch above.
+            let superseded = link_cache.get(*link).and_then(|m| m.created_at);
+            let created_at = if same_target { superseded } else { None }
+                .or(tx.created_at())
+                .unwrap_or_else(|| local_entry_ts(Utc::now(), superseded));
             match link {
                 LinkKind::Tag(tag) => {
                     // The entry key is the write: the same digest in the same
@@ -743,7 +744,9 @@ fn build_delete_mutations(
             // A tombstone entry, never a delete: it names the digest the tag
             // held because tag history requires it, and its timestamp orders
             // it against any concurrent push by key name alone.
-            let created_at = tx.delete_source_ts().unwrap_or_else(Utc::now);
+            let created_at = tx
+                .delete_source_ts()
+                .unwrap_or_else(|| local_entry_ts(Utc::now(), metadata.created_at));
             let mutation = tag_del_mutation(
                 namespace,
                 tag,

@@ -9,7 +9,7 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
 use angos_oci::{Algorithm, Digest, MediaType, Namespace, Tag};
@@ -32,6 +32,23 @@ pub struct TagEntryBody {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
+}
+
+/// The timestamp a locally authored entry carries: this replica's clock,
+/// floored one millisecond above the entry it supersedes.
+///
+/// Entry order is the tag's order, and two replicas sharing a backend can have
+/// skewed clocks. Without the floor a push or delete stamped below the current
+/// winner lands as the loser: the tag does not move, and the client is told it
+/// did. A replicated write keeps its author's timestamp instead, since that is
+/// what the last-writer-wins gate compares.
+pub fn local_entry_ts(now: DateTime<Utc>, superseded: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    match superseded {
+        // Equal counts: a same-ordinal tie resolves on the digest, not on who
+        // wrote last.
+        Some(superseded) if superseded >= now => superseded + TimeDelta::milliseconds(1),
+        _ => now,
+    }
 }
 
 /// The inverted-timestamp ordinal of `ts`: entries sort newest first.
@@ -276,6 +293,29 @@ mod tests {
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn a_local_entry_is_floored_above_the_one_it_supersedes() {
+        let now = DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        let ms = TimeDelta::milliseconds(1);
+
+        assert_eq!(local_entry_ts(now, None), now, "nothing to supersede");
+        assert_eq!(
+            local_entry_ts(now, Some(now - ms)),
+            now,
+            "an older entry leaves the clock alone"
+        );
+        assert_eq!(
+            local_entry_ts(now, Some(now)),
+            now + ms,
+            "a same-ordinal tie resolves on the digest, so equal must be bumped"
+        );
+        assert_eq!(
+            local_entry_ts(now, Some(now + TimeDelta::seconds(30))),
+            now + TimeDelta::seconds(30) + ms,
+            "a peer's clock 30s ahead must not pin the tag"
+        );
+    }
 
     #[test]
     fn the_ordinal_round_trips_and_reserves_the_never_wins_value() {

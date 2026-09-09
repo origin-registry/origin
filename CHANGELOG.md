@@ -40,6 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A shutdown stops accepting and lets the requests in flight finish within `shutdown_drain_secs`, where connection tasks were detached and every in-flight `PATCH` or `PUT` was cut with a TCP reset when the runtime went down.
 - A configuration reload no longer cancels the asynchronous webhook deliveries the displaced dispatcher had in flight, retries included, which went unlogged.
 - A configuration the server refused is no longer cached by the file watcher, where a later certificate rotation would rebuild TLS from paths that never took effect.
+- A local tag push or delete is stamped one millisecond above the entry it supersedes, so a replica whose peer's clock runs ahead no longer answers `201` or `202` for a write that lands as the loser and leaves the tag unmoved.
 
 ## 1.7.1
 
