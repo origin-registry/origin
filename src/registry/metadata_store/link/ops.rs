@@ -281,10 +281,13 @@ impl MetadataStore {
         if !plan.gc_digests.is_empty() {
             self.gc_backoff(&plan.gc_digests).await?;
             // The clearance vouches for one grace period counted from the
-            // reference wave, so a reference wave plus backoff slower than
-            // that has to redo the check.
+            // reference wave. Past that a re-check cannot vouch for anything:
+            // a run that started and finished in between leaves only a
+            // lingering marker, and beyond its linger nothing at all.
             if refs_started_at.elapsed().as_secs() > self.gc_grace_secs {
-                self.gc_backoff(&plan.gc_digests).await?;
+                return Err(Error::ReclamationInProgress(
+                    "reference wave outlasted the reclamation grace period; retry".to_string(),
+                ));
             }
         }
         self.apply_writes(&plan.records).await?;

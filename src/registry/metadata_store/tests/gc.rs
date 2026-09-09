@@ -1,16 +1,24 @@
+use std::time::Duration;
+
 use bytes::Bytes;
+use tokio::time::sleep;
 
 use angos_oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
 use crate::command::maintenance::action::Action;
 use crate::command::maintenance::executor::{ActionSink, Executor};
-use crate::registry::keys::{DigestKeys, NamespaceKeys};
+use crate::registry::keys::{DigestKeys, GC_ROOT, NamespaceKeys};
 use crate::registry::{
     Error,
     blob_ownership::{GrantOutcome, promote_and_grant},
-    metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
+    metadata_store::{BlobIndexOperation, LinkKind, MetadataStore, gc::RELEASE_LINGER_MS},
     test_utils::{FSRegistryTestCase, RegistryTestCase, upload_blob},
 };
+
+/// How long a released marker keeps blocking, as a std duration to sleep on.
+fn linger() -> Duration {
+    Duration::from_millis(u64::try_from(RELEASE_LINGER_MS).unwrap_or(0))
+}
 
 async fn seed_blob(case: &FSRegistryTestCase, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
@@ -81,10 +89,29 @@ async fn a_push_backs_off_while_a_collector_run_covers_its_blob() {
         "an unexpired run covering the digest must block a writer"
     );
 
+    // Releasing expires the marker rather than removing it: a writer whose
+    // reference landed after the run's last liveness listing must still find
+    // it, since a finished run leaves nothing else to find.
     store.gc_release(claim).await.unwrap();
     assert!(
+        store.gc_blocked(&[&digest]).await.unwrap(),
+        "a released run must keep blocking until its linger expires"
+    );
+
+    sleep(linger() * 2).await;
+    assert!(
         !store.gc_blocked(&[&digest]).await.unwrap(),
-        "a released run must unblock writers"
+        "an expired run must unblock writers"
+    );
+    assert!(
+        store
+            .object_store()
+            .list(GC_ROOT, 10, None)
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "the writer that read the marker expired must have reaped it"
     );
 }
 
@@ -257,10 +284,11 @@ async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
     );
 
     store.gc_release(claim).await.unwrap();
+    sleep(linger() * 2).await;
     registry
         .put_manifest(&namespace, &reference, Some(&media_type), &content)
         .await
-        .expect("a retry after the run's release must succeed");
+        .expect("a retry past the released run's linger must succeed");
 }
 
 /// The marker's TTL is clamped, so a grace period no chrono duration can hold

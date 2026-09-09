@@ -500,9 +500,11 @@ The one place a writer and a collector must agree is blob reclamation, and it
 is a marker protocol rather than a lock. A collector about to delete blob
 data publishes a run marker under `v2/gc/` naming the digest range it is
 working on, re-reads its own marker before the irreversible delete, and
-removes it afterwards. A writer that has just written its reference keys
-lists `v2/gc/` once: an unexpired run covering one of its digests means back
-off briefly. Freshly written blob data and fresh reference keys are
+expires it a few seconds afterwards rather than removing it, so a writer whose
+reference landed after the run's last liveness listing still finds it. A
+writer that has just written its reference keys lists `v2/gc/` once: an
+unexpired run covering one of its digests means back off briefly, and an
+expired one is reaped where it is found. Freshly written blob data and fresh reference keys are
 unconditionally live for a grace period, which is what lets uploads and
 pushes skip any coordination for new bytes. Deletes only remove records and
 ownership keys; the bytes wait for a collector sweep (`angos scrub`), which
