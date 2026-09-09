@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The circuit breaker measures its cooldown on a monotonic clock, so a wall-clock step no longer stretches or skips it.
 - Revision and referrer records honour `link_cache_ttl` like every other link instead of being cached for a year, so a manifest deleted on one replica or by `angos prune` stops answering `HEAD` and `GET` by digest on the others once the TTL elapses.
 - A shutdown stops accepting and lets the requests in flight finish within `shutdown_drain_secs`, where connection tasks were detached and every in-flight `PATCH` or `PUT` was cut with a TCP reset when the runtime went down.
+- A configuration reload no longer cancels the asynchronous webhook deliveries the displaced dispatcher had in flight, retries included, which went unlogged.
 
 ## 1.7.1
 
