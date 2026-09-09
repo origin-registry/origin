@@ -8,9 +8,13 @@ use crate::{
 
 #[async_trait]
 impl ConfigNotifier for Command {
-    async fn notify_config_change(&self, config: &Configuration) {
-        if let Err(e) = self.notify_config_change(config).await {
-            error!("Failed to apply configuration: {e}");
+    async fn notify_config_change(&self, config: &Configuration) -> bool {
+        match self.notify_config_change(config).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!("Failed to apply configuration: {e}");
+                false
+            }
         }
     }
 

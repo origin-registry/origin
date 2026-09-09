@@ -47,7 +47,10 @@ async fn coalesce_events(
 
 #[async_trait]
 pub trait ConfigNotifier: Send + Sync {
-    async fn notify_config_change(&self, config: &Configuration);
+    /// Apply `config`, reporting whether it took effect. A refused
+    /// configuration must not be cached: what the watcher holds is what a
+    /// later certificate rotation rebuilds TLS from.
+    async fn notify_config_change(&self, config: &Configuration) -> bool;
     fn notify_tls_config_change(&self, tls: &ServerTlsConfig);
 }
 
@@ -351,7 +354,13 @@ async fn reload_config(
     info!("Configuration change detected, reloading");
     match Configuration::load_all(&config.paths) {
         Ok(cfg) => {
-            notifier.notify_config_change(&cfg).await;
+            if !notifier.notify_config_change(&cfg).await {
+                // Refused: the previous configuration is still the one in
+                // effect, so the cache and the watched TLS directories must
+                // keep describing that one.
+                warn!("Configuration was not applied; keeping the previous one");
+                return TlsDirs::Unchanged;
+            }
             info!("Configuration reloaded");
             let new_tls_dirs = compute_tls_dirs(&cfg, &config.primary_dir());
             *cached_config = Some(cfg);

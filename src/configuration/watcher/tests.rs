@@ -1,6 +1,15 @@
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-use std::{fs, io::Write, path::absolute, sync::Mutex, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    path::absolute,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use notify::{
     EventKind,
@@ -153,6 +162,9 @@ fn minimal_tls_config(cert_path: &str, key_path: &str) -> String {
 struct TestNotifier {
     config_changes: Mutex<Vec<Configuration>>,
     tls_changes: Mutex<Vec<ServerTlsConfig>>,
+    /// When set, every configuration is reported as refused, as a server that
+    /// cannot apply one does.
+    refuse: AtomicBool,
 }
 
 impl TestNotifier {
@@ -160,7 +172,12 @@ impl TestNotifier {
         Self {
             config_changes: Mutex::new(Vec::new()),
             tls_changes: Mutex::new(Vec::new()),
+            refuse: AtomicBool::new(false),
         }
+    }
+
+    fn refuse_configurations(&self) {
+        self.refuse.store(true, Ordering::Release);
     }
 
     fn config_change_count(&self) -> usize {
@@ -178,8 +195,9 @@ impl TestNotifier {
 
 #[async_trait]
 impl ConfigNotifier for TestNotifier {
-    async fn notify_config_change(&self, config: &Configuration) {
+    async fn notify_config_change(&self, config: &Configuration) -> bool {
         self.config_changes.lock().unwrap().push(config.clone());
+        !self.refuse.load(Ordering::Acquire)
     }
 
     fn notify_tls_config_change(&self, tls: &ServerTlsConfig) {
@@ -699,6 +717,42 @@ fn ensure_config_cached_returns_cached_without_reading_disk() {
     let resolved = ensure_config_cached(&mut cached, std::slice::from_ref(&bogus_path));
 
     assert!(resolved.is_some(), "must reuse cached value");
+}
+
+/// The cache is what a later certificate rotation rebuilds TLS from, so a
+/// configuration the server refused must not become the cached one: it is not
+/// what is in effect.
+#[tokio::test]
+async fn a_refused_configuration_is_not_cached() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    fs::write(&config_path, config_toml("")).unwrap();
+
+    let notifier = TestNotifier::new();
+    notifier.refuse_configurations();
+    let mut cached: Option<Configuration> = None;
+
+    let dirs = reload_config(
+        &WatchedConfig::new(vec![config_path]),
+        &mut cached,
+        &HashSet::new(),
+        &notifier,
+    )
+    .await;
+
+    assert_eq!(
+        notifier.config_change_count(),
+        1,
+        "the configuration must still be offered to the server"
+    );
+    assert!(
+        cached.is_none(),
+        "a refused configuration must not be cached"
+    );
+    assert!(
+        matches!(dirs, TlsDirs::Unchanged),
+        "the watched TLS directories must keep describing the configuration in effect"
+    );
 }
 
 #[tokio::test]

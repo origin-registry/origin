@@ -184,12 +184,12 @@ async fn worker_loop(
 
 #[async_trait]
 impl ConfigNotifier for Command {
-    async fn notify_config_change(&self, config: &Configuration) {
+    async fn notify_config_change(&self, config: &Configuration) -> bool {
         let context = match WorkerContext::build(config).await {
             Ok(context) => context,
             Err(e) => {
                 error!("Failed to rebuild worker context on reload: {e}");
-                return;
+                return false;
             }
         };
         for runner in &self.queues {
@@ -197,6 +197,7 @@ impl ConfigNotifier for Command {
                 .inner
                 .store(Arc::new(context.components_for(runner.queue)));
         }
+        true
     }
 
     fn notify_tls_config_change(&self, _tls: &ServerTlsConfig) {
