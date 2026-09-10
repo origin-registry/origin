@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The pull-through and replication client refuses an upload `Location` or a pagination `Link` that points to a different origin than the response, and will not send credentials to a non-HTTPS token endpoint for an HTTPS registry, so a hostile upstream cannot harvest them.
 - The embedded web UI is served with `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`, so the session-bearing HTML cannot be sniffed or framed.
 - A CEL policy rule that errors on evaluated identity or request data no longer copies that value into the log or the denial reason; only the failing operator or method is recorded.
+- The `/readyz` probe answers a failing backend with `storage backend not ready` and logs the cause, rather than returning the storage error, which named the bucket and endpoint, to an anonymous caller.
 
 ## 1.7.2
 
