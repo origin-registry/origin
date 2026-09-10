@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The container image runs as UID 65534 instead of root, so a bind-mounted data directory must be owned by that user and a mounted private key readable by it; see the upgrade guide.
 
+### Fixed
+
+- An upload whose earlier chunk wrote bytes it never checkpointed is now failed closed when the next chunk lands, instead of promoting a blob longer than its digest covers.
+
 ## 1.7.2
 
 ### Added
