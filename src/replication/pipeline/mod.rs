@@ -23,7 +23,6 @@ use angos_oci::{Content, Digest, Manifest, Namespace, Reference, Tag};
 
 use crate::{
     registry::{
-        blob_ownership::BlobOwnership,
         blob_store::BlobStore,
         manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{LinkKind, MetadataStore},
@@ -268,7 +267,8 @@ async fn push_child_manifests(
         .collect::<Vec<_>>()
         .await;
 
-    first_error(results)
+    // Drained fully before failing, so siblings are not stranded mid-transfer.
+    results.into_iter().collect()
 }
 
 /// HEAD-before-PUT every referenced blob; transfer only the absent ones.
@@ -294,16 +294,8 @@ async fn push_blobs(ctx: &PushContext<'_>, manifest: &Manifest) -> Result<(), Er
         .collect::<Vec<_>>()
         .await;
 
-    first_error(results)
-}
-
-/// Reduces a fully drained sweep to its first failure: returning early instead
-/// would drop the siblings mid-transfer and strand their open upload sessions.
-fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
-    for result in results {
-        result?;
-    }
-    Ok(())
+    // Drained fully before failing, so siblings are not stranded mid-transfer.
+    results.into_iter().collect()
 }
 
 /// Picks a cross-repo blob-mount `from` hint: the smallest sibling namespace
@@ -316,7 +308,7 @@ async fn mount_candidate(
     digest: &Digest,
     downstream: &ReplicationDownstream,
 ) -> Option<Namespace> {
-    let sibling = BlobOwnership::new(metadata_store)
+    let sibling = metadata_store
         .smallest_referencing_namespace(digest, namespace)
         .await
         .ok()

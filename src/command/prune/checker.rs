@@ -9,11 +9,17 @@ use tracing::{debug, error};
 use angos_oci::{Digest, Namespace, Tag};
 
 use crate::{
-    command::maintenance::{Error, action::Action, check::NamespaceChecker, executor::ActionSink},
+    command::maintenance::{
+        Error,
+        action::Action,
+        check::NamespaceChecker,
+        executor::{ActionSink, object_younger_than_grace},
+    },
     policy::{ManifestImage, RetentionPolicy},
     registry::{
         Error as RegistryError, Repository,
         blob_store::BlobStore,
+        keys::DigestKeys,
         manifest::{link_plan, read_manifest},
         metadata_store::{BlobIndex, LinkKind, LinkMetadata, MetadataStore},
         repository_resolver::RepositoryResolver,
@@ -58,7 +64,7 @@ fn policies_retain(global: &PolicyDecision, repo: &PolicyDecision) -> bool {
     )
 }
 
-fn check_global_policy(
+fn check_policy(
     policy: Option<&RetentionPolicy>,
     manifest: &ManifestImage,
     last_pushed: &[String],
@@ -67,33 +73,19 @@ fn check_global_policy(
     let Some(policy) = policy else {
         return Ok(PolicyDecision::NoOpinion);
     };
-    if policy.should_retain(manifest, last_pushed, last_pulled)? {
-        Ok(PolicyDecision::Retain)
-    } else {
-        Ok(PolicyDecision::Delete)
-    }
+    Ok(
+        if policy.should_retain(manifest, last_pushed, last_pulled)? {
+            PolicyDecision::Retain
+        } else {
+            PolicyDecision::Delete
+        },
+    )
 }
 
-fn check_repo_policy(
-    repository: Option<&Repository>,
-    manifest: &ManifestImage,
-    last_pushed: &[String],
-    last_pulled: &[String],
-) -> Result<PolicyDecision, Error> {
-    let Some(repo) = repository else {
-        return Ok(PolicyDecision::NoOpinion);
-    };
-    if !repo.retention_policy.has_rules() {
-        return Ok(PolicyDecision::NoOpinion);
-    }
-    if repo
-        .retention_policy
-        .should_retain(manifest, last_pushed, last_pulled)?
-    {
-        Ok(PolicyDecision::Retain)
-    } else {
-        Ok(PolicyDecision::Delete)
-    }
+/// The repository's own retention policy, when it declares rules.
+fn repository_policy(repository: Option<&Repository>) -> Option<&RetentionPolicy> {
+    let policy = &repository?.retention_policy;
+    policy.has_rules().then_some(policy)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -122,8 +114,13 @@ fn decide_orphan_fate(
         return Ok(Fate::Skip);
     };
 
-    let global = check_global_policy(global_policy, manifest, last_pushed, last_pulled)?;
-    let repo = check_repo_policy(repository, manifest, last_pushed, last_pulled)?;
+    let global = check_policy(global_policy, manifest, last_pushed, last_pulled)?;
+    let repo = check_policy(
+        repository_policy(repository),
+        manifest,
+        last_pushed,
+        last_pulled,
+    )?;
 
     Ok(if policies_retain(&global, &repo) {
         Fate::Retain
@@ -137,9 +134,9 @@ fn decide_orphan_fate(
 /// so an unconfigured registry retains the grant like an orphan manifest.
 ///
 /// `in_flight_window` guards the push race, not the decision: a push grants
-/// ownership before it links the manifest, so bytes younger than the window
-/// are never considered. The executor re-checks the references and the own
-/// key's age at apply time before revoking.
+/// ownership before it links the manifest, so neither bytes nor a grant
+/// younger than the window is considered. The executor re-checks the
+/// references and the own key's age at apply time before revoking.
 pub async fn sweep_orphan_grants(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
@@ -155,6 +152,7 @@ pub async fn sweep_orphan_grants(
         resolver,
         global_policy,
         in_flight_window,
+        in_flight_window_secs: u64::try_from(in_flight_window.num_seconds()).unwrap_or(0),
         now: Utc::now(),
         sink,
     };
@@ -177,13 +175,17 @@ struct GrantSweep<'a> {
     resolver: &'a Arc<RepositoryResolver>,
     global_policy: Option<&'a RetentionPolicy>,
     in_flight_window: Duration,
+    /// [`Self::in_flight_window`] in seconds, for the key-age helper.
+    in_flight_window_secs: u64,
     now: DateTime<Utc>,
     sink: &'a dyn ActionSink,
 }
 
 async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<(), Error> {
-    // In-flight guard on the bytes' mtime; with no mtime or no bytes, leave
-    // the blob to scrub's orphan GC.
+    // With no mtime or no bytes, leave the blob to scrub's orphan GC. The
+    // mtime spares a whole freshly uploaded blob, and dates the retention
+    // subject below; a grant's own in-flight guard is per namespace, since a
+    // mount writes a fresh ownership key over bytes of any age.
     let last_modified = match ctx.blob_store.last_modified(blob).await {
         Ok(Some(ts)) => ts,
         Ok(None) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => return Ok(()),
@@ -219,8 +221,22 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
         if !links.contains(&grant) || links.iter().any(LinkKind::is_tracked) {
             continue;
         }
-        let global = check_global_policy(ctx.global_policy, &subject, &[], &[])?;
-        let repo = check_repo_policy(repository, &subject, &[], &[])?;
+        // A cross-repository mount grants ownership of bytes that may be weeks
+        // old, so the window that shields an in-flight push is measured on the
+        // grant, not on what it points at. A gone key is already revoked.
+        if object_younger_than_grace(
+            ctx.metadata_store.object_store().as_ref(),
+            &blob.blob_ref_own_path(&namespace),
+            ctx.in_flight_window_secs,
+        )
+        .await
+        .map_err(RegistryError::from)?
+        .unwrap_or(true)
+        {
+            continue;
+        }
+        let global = check_policy(ctx.global_policy, &subject, &[], &[])?;
+        let repo = check_policy(repository_policy(repository), &subject, &[], &[])?;
         if policies_retain(&global, &repo) {
             continue;
         }
@@ -256,7 +272,8 @@ impl NamespaceChecker for RetentionChecker {
         debug!("Checking retention policies on '{namespace}'");
 
         let tag_metadata = self.fetch_tag_metadata(namespace).await?;
-        let (last_pushed, last_pulled) = Self::build_sorted_rankings(&tag_metadata);
+        let last_pushed = Self::rank_by(&tag_metadata, |t| t.metadata.created_at);
+        let last_pulled = Self::rank_by(&tag_metadata, |t| t.pulled_at);
 
         let tags = self.get_deletable_tags(namespace, &tag_metadata, &last_pushed, &last_pulled);
         self.emit_delete_tags(namespace, &tags, sink).await?;
@@ -296,12 +313,6 @@ impl RetentionChecker {
             .await
     }
 
-    fn build_sorted_rankings(tags: &[TagWithMetadata]) -> (Vec<String>, Vec<String>) {
-        let last_pushed = Self::rank_by(tags, |t| t.metadata.created_at);
-        let last_pulled = Self::rank_by(tags, |t| t.pulled_at);
-        (last_pushed, last_pulled)
-    }
-
     /// Ranks tags most recent first, leaving out those carrying no such time.
     /// A never-pulled tag is not one of the "n most recently pulled", and
     /// ranking it would make `top_pulled(n)` retain untouched tags forever.
@@ -323,7 +334,7 @@ impl RetentionChecker {
         tags: &'a [TagWithMetadata],
         last_pushed: &[String],
         last_pulled: &[String],
-    ) -> Vec<&'a Tag> {
+    ) -> Vec<&'a TagWithMetadata> {
         tags.iter()
             .filter(
                 |tag| match self.should_retain_tag(namespace, tag, last_pushed, last_pulled) {
@@ -337,7 +348,6 @@ impl RetentionChecker {
                     }
                 },
             )
-            .map(|tag| &tag.name)
             .collect()
     }
 
@@ -346,16 +356,22 @@ impl RetentionChecker {
     async fn emit_delete_tags(
         &self,
         namespace: &Namespace,
-        tags_to_delete: &[&Tag],
+        tags_to_delete: &[&TagWithMetadata],
         sink: &dyn ActionSink,
     ) -> Result<(), Error> {
         for tag in tags_to_delete {
             let action = Action::DeleteTag {
                 namespace: namespace.clone(),
-                tag: (*tag).clone(),
+                tag: tag.name.clone(),
+                // What the tag resolved to when it was judged: a re-push
+                // between here and the delete must not be swept away.
+                target: Some(tag.metadata.target.clone()),
             };
             if let Err(e) = sink.apply(action).await {
-                error!("Failed to delete tag '{namespace}:{tag}' for retention: {e}");
+                error!(
+                    "Failed to delete tag '{namespace}:{}' for retention: {e}",
+                    tag.name
+                );
             }
         }
         Ok(())
@@ -376,34 +392,23 @@ impl RetentionChecker {
             tag.pulled_at,
             Utc::now(),
         );
-
-        self.evaluate_retention_policies(namespace, &tag.name, &manifest, last_pushed, last_pulled)
-    }
-
-    fn evaluate_retention_policies(
-        &self,
-        namespace: &Namespace,
-        tag: &Tag,
-        manifest: &ManifestImage,
-        last_pushed: &[String],
-        last_pulled: &[String],
-    ) -> Result<bool, Error> {
-        let global = check_global_policy(
+        let global = check_policy(
             self.global_retention_policy.as_deref(),
-            manifest,
+            &manifest,
             last_pushed,
             last_pulled,
         )?;
-        let repo = check_repo_policy(
-            self.resolver.resolve(namespace),
-            manifest,
+        let repo = check_policy(
+            repository_policy(self.resolver.resolve(namespace)),
+            &manifest,
             last_pushed,
             last_pulled,
         )?;
 
         let retain = policies_retain(&global, &repo);
         debug!(
-            "Retention verdict for {namespace}:{tag}: global={global:?} repo={repo:?} retain={retain}"
+            "Retention verdict for {namespace}:{}: global={global:?} repo={repo:?} retain={retain}",
+            tag.name
         );
         Ok(retain)
     }
@@ -595,9 +600,10 @@ impl RetentionChecker {
 mod tests {
     use std::{
         collections::HashMap,
+        fs::{File, FileTimes},
         str::FromStr,
         sync::atomic::{AtomicUsize, Ordering},
-        time::Duration as StdDuration,
+        time::{Duration as StdDuration, SystemTime},
     };
 
     use chrono::{TimeZone, Utc};
@@ -768,7 +774,8 @@ mod tests {
             tag_with_times("new", Some(t3), None),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed[0], "new");
         assert_eq!(last_pushed[1], "old");
@@ -787,7 +794,8 @@ mod tests {
             tag_with_times("pulled", Some(pushed), Some(pulled)),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed.len(), 2);
         assert_eq!(last_pulled, vec!["pulled".to_string()]);
@@ -803,7 +811,8 @@ mod tests {
             tag_with_times("b", Some(pushed_time), Some(pulled_time)),
         ];
 
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+        let last_pushed = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
+        let last_pulled = RetentionChecker::rank_by(&tags, |t| t.pulled_at);
 
         assert_eq!(last_pushed[0], "a");
         assert_eq!(last_pulled[0], "b");
@@ -1214,7 +1223,7 @@ mod tests {
             policy: DeliveryPolicy::Required,
             token: None,
             timeout_ms: 5_000,
-            max_retries: 0,
+            max_retries: Some(0),
             events: vec![EventKind::ManifestDelete, EventKind::TagDelete],
             repository_filter: None,
         };
@@ -1381,7 +1390,7 @@ mod tests {
     #[test]
     fn check_global_policy_returns_no_opinion_when_policy_absent() {
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(None, &manifest, &[], &[]).unwrap();
+        let result = check_policy(None, &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1394,7 +1403,7 @@ mod tests {
             Arc::new(SystemClock),
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(Some(&policy), &manifest, &[], &[]).unwrap();
+        let result = check_policy(Some(&policy), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Retain);
     }
 
@@ -1407,7 +1416,7 @@ mod tests {
             Arc::new(SystemClock),
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_global_policy(Some(&policy), &manifest, &[], &[]).unwrap();
+        let result = check_policy(Some(&policy), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Delete);
     }
 
@@ -1429,7 +1438,7 @@ mod tests {
     #[test]
     fn check_repo_policy_returns_no_opinion_when_repository_absent() {
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(None, &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(None), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1437,7 +1446,7 @@ mod tests {
     fn check_repo_policy_returns_no_opinion_when_repo_has_no_rules() {
         let repo = make_repo("r", vec![]);
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::NoOpinion);
     }
 
@@ -1445,7 +1454,7 @@ mod tests {
     fn check_repo_policy_returns_retain_when_repo_policy_keeps() {
         let repo = make_repo("r", vec![CelRule::compile("image.tag == 'v1'").unwrap()]);
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Retain);
     }
 
@@ -1456,7 +1465,7 @@ mod tests {
             vec![CelRule::compile("image.tag == 'keep-me'").unwrap()],
         );
         let manifest = make_manifest(&Tag::new("v1").unwrap());
-        let result = check_repo_policy(Some(&repo), &manifest, &[], &[]).unwrap();
+        let result = check_policy(repository_policy(Some(&repo)), &manifest, &[], &[]).unwrap();
         assert_eq!(result, PolicyDecision::Delete);
     }
 
@@ -1583,6 +1592,47 @@ mod tests {
             RepositoryResolver::new(test_utils::create_test_repositories())
                 .expect("test repositories must not overlap"),
         )
+    }
+
+    /// A cross-repository mount grants ownership of bytes that may be weeks
+    /// old, so the window that shields an in-flight push has to be measured on
+    /// the grant. Measured on the bytes it never fires, and a deleting policy
+    /// revokes the mount mid-push.
+    #[tokio::test]
+    async fn a_fresh_grant_over_old_bytes_stays_inside_the_in_flight_window() {
+        let test_case = FSRegistryTestCase::new();
+        let namespace = Namespace::new("test-repo/mounted").unwrap();
+        let metadata_store = test_case.metadata_store();
+        let blob = seed_grant_only_blob(&test_case, &namespace).await;
+
+        // Age the bytes a week; the grant naming them was written just now.
+        let week_ago = SystemTime::now() - StdDuration::from_hours(24 * 7);
+        File::options()
+            .write(true)
+            .open(test_case.temp_dir().path().join(blob.blob_path()))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(week_ago))
+            .unwrap();
+
+        sweep_orphan_grants(
+            &test_case.blob_store(),
+            &metadata_store,
+            &grant_resolver(),
+            Some(&keep_nothing_policy()),
+            chrono::Duration::days(1),
+            &Executor::new_for_test(test_case.blob_store(), metadata_store.clone()),
+            4,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            metadata_store
+                .read_blob_index_namespace(&namespace, &blob)
+                .await
+                .is_ok(),
+            "a grant written inside the in-flight window must survive, however old its bytes"
+        );
     }
 
     #[tokio::test]

@@ -188,6 +188,86 @@ async fn an_old_shape_entry_body_still_resolves() {
     assert_eq!(body.annotations, None);
 }
 
+/// A peer replica sharing the backend can stamp an entry ahead of this
+/// replica's clock. A local push must still move the tag: answering 201 for a
+/// write that lands as the loser tells the client something untrue.
+#[tokio::test]
+async fn a_local_push_outranks_an_entry_from_a_faster_peer() {
+    let dir = TempDir::new().unwrap();
+    let backend: Arc<dyn ObjectStore> = Arc::new(
+        StorageFsBackend::builder(dir.path())
+            .sync_to_disk(false)
+            .build(),
+    );
+    let store = metadata_store_over_cached(backend, 0);
+    let namespace = Namespace::new("skewed-peer").unwrap();
+    let tag = Tag::new("latest").unwrap();
+    let peer = Digest::sha256_of_bytes(b"what the faster peer pushed");
+    let local = Digest::sha256_of_bytes(b"what this replica pushed");
+
+    // The peer's clock runs a minute ahead, and its write replicates here
+    // carrying its own author time.
+    store
+        .store_manifest(
+            &namespace,
+            &[LinkOperation::create(
+                LinkKind::Tag(tag.clone()),
+                peer.clone(),
+            )],
+            Some(entry_ms(Utc::now()) + TimeDelta::seconds(60)),
+            ReferencePolicy::Trusted,
+        )
+        .await
+        .unwrap();
+
+    // A local push, stamped by this replica's own clock.
+    store
+        .store_manifest(
+            &namespace,
+            &[LinkOperation::create(
+                LinkKind::Tag(tag.clone()),
+                local.clone(),
+            )],
+            None,
+            ReferencePolicy::Trusted,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+            .await
+            .unwrap()
+            .target,
+        local,
+        "a local push must move the tag it reported as pushed"
+    );
+
+    // The same holds for the tombstone a local delete writes.
+    store
+        .delete_links(
+            &namespace,
+            &[LinkOperation::delete(LinkKind::Tag(tag))],
+            None,
+        )
+        .await
+        .unwrap();
+
+    let tags: Vec<String> = store
+        .list_tags(&namespace, 10, None)
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        tags.is_empty(),
+        "a local delete must remove the tag it reported as deleted, got {tags:?}"
+    );
+}
+
 /// A tag page starts strictly after its cursor. The `!` suffix on a tag's
 /// entry directory is what keeps a name that is a prefix of another sorting
 /// first, so the page can be served off the entry listing itself, and the

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use cel_interpreter::Context;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::policy::{CelRule, Error, RuleOutcome, clock::Clock, evaluate_rules};
@@ -48,47 +48,21 @@ impl RetentionPolicyConfig {
     }
 }
 
-/// Seconds since the Unix epoch, or [`Self::NEVER`] for a timestamp the link
-/// does not carry. Negative inputs (pre-epoch dates) are saturated to zero.
-///
-/// Serializes as `i64`, `NEVER` as `0`, so CEL expressions using integer
-/// arithmetic (e.g. `image.pushed_at > now() - days(30)`) keep working without
-/// cross-type coercion.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EpochSeconds(Option<u64>);
-
-impl EpochSeconds {
-    /// No timestamp: an image that was never pulled.
-    pub const NEVER: Self = Self(None);
-
-    /// Constructs an `EpochSeconds` from a signed timestamp.
-    ///
-    /// Negative values (pre-epoch) are saturated to zero.
-    pub fn from_seconds(s: i64) -> Self {
-        Self(Some(u64::try_from(s).unwrap_or(0)))
-    }
-}
-
-impl Serialize for EpochSeconds {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let seconds = self.0.unwrap_or(0);
-        serializer.serialize_i64(i64::try_from(seconds).unwrap_or(i64::MAX))
-    }
-}
-
 /// Manifest image information used in retention decisions.
 #[derive(Debug, Default, Serialize)]
 pub struct ManifestImage {
     pub tag: Option<String>,
-    pub pushed_at: EpochSeconds,
-    pub last_pulled_at: EpochSeconds,
+    /// Seconds since the Unix epoch, pre-epoch dates saturated to zero.
+    pub pushed_at: i64,
+    /// Seconds since the Unix epoch, `0` for an image never pulled.
+    pub last_pulled_at: i64,
 }
 
 impl ManifestImage {
     /// Builds the CEL-facing image from the optional timestamps a link carries.
     /// An unknown push time becomes `now`, so an age rule keeps content of
     /// unknown age instead of deleting it as if pushed at the epoch; an unknown
-    /// pull time stays [`EpochSeconds::NEVER`] and reaches CEL as `0`.
+    /// pull time reaches CEL as `0`.
     #[must_use]
     pub fn new(
         tag: Option<String>,
@@ -98,10 +72,8 @@ impl ManifestImage {
     ) -> Self {
         Self {
             tag,
-            pushed_at: EpochSeconds::from_seconds(pushed_at.unwrap_or(now).timestamp()),
-            last_pulled_at: last_pulled_at.map_or(EpochSeconds::NEVER, |t| {
-                EpochSeconds::from_seconds(t.timestamp())
-            }),
+            pushed_at: pushed_at.unwrap_or(now).timestamp().max(0),
+            last_pulled_at: last_pulled_at.map_or(0, |t| t.timestamp().max(0)),
         }
     }
 }
@@ -350,7 +322,7 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("v1".to_string()),
-            pushed_at: EpochSeconds::from_seconds(now.timestamp()),
+            pushed_at: now.timestamp(),
             ..Default::default()
         };
 
@@ -364,7 +336,7 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("v1".to_string()),
-            pushed_at: EpochSeconds::from_seconds(now.timestamp() - 2 * 86400),
+            pushed_at: now.timestamp() - 2 * 86400,
             ..Default::default()
         };
 
@@ -378,7 +350,7 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("v1".to_string()),
-            last_pulled_at: EpochSeconds::from_seconds(now.timestamp()),
+            last_pulled_at: now.timestamp(),
             ..Default::default()
         };
 
@@ -392,7 +364,7 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("v2".to_string()),
-            last_pulled_at: EpochSeconds::from_seconds(now.timestamp() - 2 * 3600),
+            last_pulled_at: now.timestamp() - 2 * 3600,
             ..Default::default()
         };
 
@@ -401,9 +373,9 @@ mod tests {
 
     #[test]
     fn negative_timestamp_saturates_to_zero() {
-        let t = EpochSeconds::from_seconds(-100);
-        let serialized = serde_json::to_value(t).unwrap();
-        assert_eq!(serialized, serde_json::json!(0));
+        let pre_epoch = DateTime::from_timestamp(-100, 0).unwrap();
+        let image = ManifestImage::new(None, Some(pre_epoch), Some(pre_epoch), fixed_now());
+        assert_eq!((image.pushed_at, image.last_pulled_at), (0, 0));
     }
 
     #[test]
@@ -509,7 +481,7 @@ mod tests {
 
         let matching = ManifestImage {
             tag: Some("v1".to_string()),
-            pushed_at: EpochSeconds::from_seconds(fixed.timestamp()),
+            pushed_at: fixed.timestamp(),
             ..Default::default()
         };
         assert!(
@@ -519,7 +491,7 @@ mod tests {
 
         let one_second_later = ManifestImage {
             tag: Some("v1".to_string()),
-            pushed_at: EpochSeconds::from_seconds(fixed.timestamp() + 1),
+            pushed_at: fixed.timestamp() + 1,
             ..Default::default()
         };
         assert!(
@@ -580,8 +552,7 @@ mod tests {
 
         let never_pulled = ManifestImage::new(None, None, None, now);
         assert_eq!(
-            never_pulled.last_pulled_at,
-            EpochSeconds::NEVER,
+            never_pulled.last_pulled_at, 0,
             "never pulled must be an absence, not a timestamp at the epoch"
         );
         let unknown = serde_json::to_value(never_pulled).unwrap();

@@ -23,10 +23,10 @@ const EXTENSION: &str = "_angos/";
 const REPOSITORY_EXTENSION: &str = "/_angos/";
 
 /// Deserializes a query string, returning `None` when a value fails to
-/// deserialize so the caller can reject the route or fall back with
-/// `unwrap_or_default`.
-fn parse_query<T: DeserializeOwned>(params: &str) -> Option<T> {
-    serde_html_form::from_str(params).ok()
+/// deserialize so the caller can reject the route. An absent query is an empty
+/// one, so every field takes its default.
+fn parse_query<T: DeserializeOwned>(params: Option<&str>) -> Option<T> {
+    serde_html_form::from_str(params.unwrap_or_default()).ok()
 }
 
 /// Parses the HTTP method and URI into a registry `Action`.
@@ -58,7 +58,7 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
         // A Docker Registry V2 endpoint the OCI spec does not define. It keeps
         // its long-standing path, which clients already call.
         "/v2/_catalog" if method == Method::GET => {
-            let PaginationQuery { n, last } = parse_pagination(params)?;
+            let PaginationQuery { n, last } = parse_query(params)?;
             return Some(Action::ListCatalog { n, last });
         }
         _ => {}
@@ -92,9 +92,8 @@ struct NamespaceQuery {
 
 /// The `?ns=` a request names, if any.
 pub fn proxy_namespace(uri: &Uri) -> Option<String> {
-    uri.query()
-        .and_then(parse_query::<NamespaceQuery>)
-        .and_then(|query| query.ns)
+    parse_query::<NamespaceQuery>(uri.query())?
+        .ns
         .filter(|ns| !ns.is_empty())
 }
 
@@ -104,9 +103,7 @@ struct DigestQuery {
 }
 
 fn digest_from_params(params: Option<&str>) -> Option<Digest> {
-    params
-        .and_then(parse_query::<DigestQuery>)
-        .and_then(|q| q.digest)
+    parse_query::<DigestQuery>(params)?.digest
 }
 
 /// Repeated `tag` query parameters for the distribution-spec tag-on-push
@@ -152,15 +149,6 @@ struct CursorQuery {
     last: Option<String>,
 }
 
-/// Strict parse: a malformed `?n=` or `?last=` is a bad cursor, not an absent
-/// one, so it must not degrade into an unpaginated listing.
-fn parse_pagination(params: Option<&str>) -> Option<PaginationQuery> {
-    match params {
-        Some(params) => parse_query(params),
-        None => Some(PaginationQuery::default()),
-    }
-}
-
 /// The angos repository whose namespaces are listed. A repository is angos's
 /// own grouping, not an OCI name, so it cannot sit in the `<name>` slot of the
 /// path without claiming a scoping the registry does not have.
@@ -182,22 +170,6 @@ struct JobsQuery {
 
 fn default_jobs_queue() -> Queue {
     Queue::Cache
-}
-
-/// Parses the `?n=&after=&queue=` of a `_jobs` admin route strictly: a lenient
-/// parse would reset the whole struct on one bad value and silently administer
-/// the default `cache` queue. Returns `None` on a malformed value or unknown
-/// queue; an absent selector defaults to `cache`.
-fn parse_jobs_query(params: Option<&str>) -> Option<JobsQuery> {
-    match params {
-        Some(params) => parse_query(params),
-        None => Some(JobsQuery {
-            n: None,
-            after: None,
-            queue: default_jobs_queue(),
-            key: None,
-        }),
-    }
 }
 
 /// Angos's own endpoints, under the extension namespace the distribution spec
@@ -224,25 +196,25 @@ fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Opti
             "ui/config" => Some(Action::UiConfig),
             "repositories/list" => Some(Action::ListRepositories),
             "namespaces/list" => {
-                let NamespacesQuery { repository } = parse_query(params?)?;
+                let NamespacesQuery { repository } = parse_query(params)?;
                 Some(Action::ListNamespaces { repository })
             }
             "jobs/list" => {
                 let JobsQuery {
                     n, after, queue, ..
-                } = parse_jobs_query(params)?;
+                } = parse_query(params)?;
                 Some(Action::ListJobs { queue, n, after })
             }
             "jobs/failed" => {
                 let JobsQuery {
                     n, after, queue, ..
-                } = parse_jobs_query(params)?;
+                } = parse_query(params)?;
                 Some(Action::ListFailedJobs { queue, n, after })
             }
             _ => None,
         },
         Method::POST if path == "jobs/failed" => {
-            let JobsQuery { queue, key, .. } = parse_jobs_query(params)?;
+            let JobsQuery { queue, key, .. } = parse_query(params)?;
             Some(Action::RetryJob {
                 queue,
                 storage_key: key.filter(|key| is_job_key(key))?,
@@ -254,7 +226,7 @@ fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Opti
                 "jobs/pending" => JobState::Pending,
                 _ => return None,
             };
-            let JobsQuery { queue, key, .. } = parse_jobs_query(params)?;
+            let JobsQuery { queue, key, .. } = parse_query(params)?;
             Some(Action::DeleteJob {
                 queue,
                 state,
@@ -282,7 +254,7 @@ fn repository_extension(
         "uploads/list" => Some(Action::ListUploads { namespace }),
         "pulls/list" => Some(Action::ListPulls {
             namespace,
-            reference: parse_pulls_reference(params?)?,
+            reference: parse_pulls_reference(params)?,
         }),
         _ => None,
     }
@@ -297,7 +269,7 @@ struct PullsQuery {
 
 /// Parses `?tag=`/`?digest=` strictly: an unparseable or ambiguous target is
 /// refused rather than silently narrowed to one of the two.
-fn parse_pulls_reference(params: &str) -> Option<Reference> {
+fn parse_pulls_reference(params: Option<&str>) -> Option<Reference> {
     let PullsQuery { tag, digest } = parse_query(params)?;
     match (tag, digest) {
         (Some(tag), None) => Some(Reference::Tag(tag)),
@@ -321,10 +293,7 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         }
         // The OCI fall-back-to-session rule covers unsatisfiable mounts, not
         // syntactically invalid ones, so a malformed query is a 400.
-        let query: MountQuery = match params {
-            Some(p) => parse_query(p)?,
-            None => MountQuery::default(),
-        };
+        let query: MountQuery = parse_query(params)?;
 
         if let Some(digest) = query.mount {
             return Some(Action::MountBlob {
@@ -371,69 +340,51 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
 }
 
 fn try_find_blobs(method: &Method, path: &str) -> Option<Action> {
-    if let Some((namespace_str, digest)) = server::split_blob_path(path) {
-        let namespace = Namespace::new(namespace_str).ok()?;
-        let digest = Digest::from_str(digest).ok()?;
+    let (namespace_str, digest) = server::split_blob_path(path)?;
+    let namespace = Namespace::new(namespace_str).ok()?;
+    let digest = Digest::from_str(digest).ok()?;
 
-        match *method {
-            Method::GET => return Some(Action::GetBlob { namespace, digest }),
-            Method::HEAD => return Some(Action::HeadBlob { namespace, digest }),
-            Method::DELETE => return Some(Action::DeleteBlob { namespace, digest }),
-            _ => {}
-        }
+    match *method {
+        Method::GET => Some(Action::GetBlob { namespace, digest }),
+        Method::HEAD => Some(Action::HeadBlob { namespace, digest }),
+        Method::DELETE => Some(Action::DeleteBlob { namespace, digest }),
+        _ => None,
     }
-
-    None
 }
 
 fn try_find_manifests(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some((namespace_str, reference)) = server::split_manifest_path(path) {
-        let namespace = Namespace::new(namespace_str).ok()?;
-        let reference = Reference::from_str(reference).ok()?;
+    let (namespace_str, reference) = server::split_manifest_path(path)?;
+    let namespace = Namespace::new(namespace_str).ok()?;
+    let reference = Reference::from_str(reference).ok()?;
 
-        match *method {
-            Method::GET => {
-                return Some(Action::GetManifest {
-                    namespace,
-                    reference,
-                });
-            }
-            Method::HEAD => {
-                return Some(Action::HeadManifest {
-                    namespace,
-                    reference,
-                });
-            }
-            Method::PUT => {
-                // `?tag=` applies only to a by-digest push; a by-tag push ignores it.
-                // Strict parse: a single invalid tag rejects the PUT (generic 400)
-                // rather than silently dropping every requested tag.
-                let target = match reference {
-                    Reference::Tag(tag) => ManifestPutTarget::Tag(tag),
-                    Reference::Digest(digest) => {
-                        let tags = match params {
-                            Some(p) => parse_query::<TagQuery>(p)?.tag,
-                            None => BTreeSet::new(),
-                        };
-                        ManifestPutTarget::Digest {
-                            digest,
-                            tags: tags.into_iter().collect(),
-                        }
-                    }
-                };
-                return Some(Action::PutManifest { namespace, target });
-            }
-            Method::DELETE => {
-                return Some(Action::DeleteManifest {
-                    namespace,
-                    reference,
-                });
-            }
-            _ => {}
+    match *method {
+        Method::GET => Some(Action::GetManifest {
+            namespace,
+            reference,
+        }),
+        Method::HEAD => Some(Action::HeadManifest {
+            namespace,
+            reference,
+        }),
+        Method::PUT => {
+            // `?tag=` applies only to a by-digest push; a by-tag push ignores it.
+            // Strict parse: a single invalid tag rejects the PUT (generic 400)
+            // rather than silently dropping every requested tag.
+            let target = match reference {
+                Reference::Tag(tag) => ManifestPutTarget::Tag(tag),
+                Reference::Digest(digest) => ManifestPutTarget::Digest {
+                    digest,
+                    tags: parse_query::<TagQuery>(params)?.tag.into_iter().collect(),
+                },
+            };
+            Some(Action::PutManifest { namespace, target })
         }
+        Method::DELETE => Some(Action::DeleteManifest {
+            namespace,
+            reference,
+        }),
+        _ => None,
     }
-
-    None
 }
 
 /// Whether a request [`parse`] refused was a referrers read owing a `400`: a
@@ -453,46 +404,33 @@ pub fn is_invalid_referrers_request(method: &Method, uri: &Uri) -> bool {
 }
 
 fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some((namespace_str, digest)) = server::split_referrers_path(path) {
-        let namespace = Namespace::new(namespace_str).ok()?;
-        let digest = Digest::from_str(digest).ok()?;
-
-        // Strict parse: a malformed `?artifactType=` is a bad filter, not an
-        // absent one, so it must not degrade into an unfiltered listing.
-        let artifact_type = match params {
-            Some(params) => parse_query::<ArtifactTypeQuery>(params)?.artifact_type,
-            None => None,
-        };
-
-        if *method == Method::GET {
-            // The spec defines no page size here, so only the cursor the
-            // registry minted in its own `Link` is read back.
-            let last = match params {
-                Some(params) => parse_query::<CursorQuery>(params)?.last,
-                None => None,
-            };
-            return Some(Action::GetReferrer {
-                namespace,
-                digest,
-                artifact_type,
-                last,
-            });
-        }
+    let (namespace_str, digest) = server::split_referrers_path(path)?;
+    if *method != Method::GET {
+        return None;
     }
+    let namespace = Namespace::new(namespace_str).ok()?;
+    let digest = Digest::from_str(digest).ok()?;
 
-    None
+    // Strict parse: a malformed `?artifactType=` is a bad filter, not an
+    // absent one, so it must not degrade into an unfiltered listing. The spec
+    // defines no page size here, so only the cursor the registry minted in its
+    // own `Link` is read back.
+    Some(Action::GetReferrer {
+        namespace,
+        digest,
+        artifact_type: parse_query::<ArtifactTypeQuery>(params)?.artifact_type,
+        last: parse_query::<CursorQuery>(params)?.last,
+    })
 }
 
 fn try_find_tags(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some(namespace_str) = path.strip_suffix(TAGS_LIST)
-        && *method == Method::GET
-    {
-        let namespace = Namespace::new(namespace_str).ok()?;
-        let PaginationQuery { n, last } = parse_pagination(params)?;
-        return Some(Action::ListTags { namespace, n, last });
+    let namespace_str = path.strip_suffix(TAGS_LIST)?;
+    if *method != Method::GET {
+        return None;
     }
-
-    None
+    let namespace = Namespace::new(namespace_str).ok()?;
+    let PaginationQuery { n, last } = parse_query(params)?;
+    Some(Action::ListTags { namespace, n, last })
 }
 
 #[cfg(test)]

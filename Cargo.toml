@@ -76,7 +76,7 @@ http-body-util = "0.1.5"
 humantime = "2.4.0"
 http = { workspace = true }
 hyper = { workspace = true, features = ["full"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "server-graceful"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 mime_guess = "2.0.5"
 notify = "8.2"

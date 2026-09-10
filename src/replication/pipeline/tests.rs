@@ -66,7 +66,7 @@ fn test_blob_store() -> (
 
 /// The modal test downstream: no remapping, four concurrent pushes.
 fn test_downstream(client: Arc<RegistryClient>) -> ReplicationDownstream {
-    ReplicationDownstream::builder("test".to_string(), client, 4).build()
+    ReplicationDownstream::new("test".to_string(), client, 4)
 }
 
 /// The modal test `PushContext`: same-namespace downstream, no source

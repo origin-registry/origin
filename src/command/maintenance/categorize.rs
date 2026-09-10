@@ -164,12 +164,9 @@ fn categorize_blob(rest: &str) -> KeyCategory {
     let [algorithm, prefix, hash, tail @ ..] = segments.as_slice() else {
         return KeyCategory::Unknown;
     };
-    let Some(digest) = parse_digest(algorithm, hash) else {
+    let Some(digest) = parse_sharded(algorithm, prefix, hash) else {
         return KeyCategory::Unknown;
     };
-    if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
-        return KeyCategory::Unknown;
-    }
 
     match *tail {
         ["data"] => KeyCategory::BlobData { digest },
@@ -188,12 +185,9 @@ fn categorize_ref(rest: &str) -> KeyCategory {
     ) else {
         return KeyCategory::Unknown;
     };
-    let Some(digest) = parse_digest(algorithm, hash) else {
+    let Some(digest) = parse_sharded(algorithm, prefix, hash) else {
         return KeyCategory::Unknown;
     };
-    if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
-        return KeyCategory::Unknown;
-    }
     match digest.parse_blob_ref(tail) {
         Some((namespace, link)) => KeyCategory::BlobRef {
             digest,
@@ -214,26 +208,21 @@ fn categorize_ns(rest: &str) -> KeyCategory {
     if Namespace::new(namespace).is_err() {
         return KeyCategory::Unknown;
     }
-    if let Some(tag_rest) = marker.strip_prefix("tag/") {
-        let Some((tag, entry)) = tag_rest.split_once("!/") else {
+    if let Some((kind @ ("tag" | "hist"), entries)) = marker.split_once('/') {
+        let Some((tag, entry)) = entries.split_once("!/") else {
             return KeyCategory::Unknown;
         };
-        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
-            return KeyCategory::TagEntry {
+        if Tag::new(tag).is_err() || parse_tag_entry(entry).is_none() {
+            return KeyCategory::Unknown;
+        }
+        return if kind == "tag" {
+            KeyCategory::TagEntry {
                 namespace: namespace.to_string(),
                 tag: tag.to_string(),
-            };
-        }
-        return KeyCategory::Unknown;
-    }
-    if let Some(hist_rest) = marker.strip_prefix("hist/") {
-        let Some((tag, entry)) = hist_rest.split_once("!/") else {
-            return KeyCategory::Unknown;
+            }
+        } else {
+            KeyCategory::TagHistory
         };
-        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
-            return KeyCategory::TagHistory;
-        }
-        return KeyCategory::Unknown;
     }
     if let Some(rest) = marker.strip_prefix("atime/") {
         return categorize_atime(namespace, rest);
@@ -243,12 +232,9 @@ fn categorize_ns(rest: &str) -> KeyCategory {
         let [algorithm, prefix, hash] = segments.as_slice() else {
             return KeyCategory::Unknown;
         };
-        let Some(digest) = parse_digest(algorithm, hash) else {
+        let Some(digest) = parse_sharded(algorithm, prefix, hash) else {
             return KeyCategory::Unknown;
         };
-        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
-            return KeyCategory::Unknown;
-        }
         return KeyCategory::RevisionRecord {
             namespace: namespace.to_string(),
             digest,
@@ -259,12 +245,9 @@ fn categorize_ns(rest: &str) -> KeyCategory {
         let [algorithm, prefix, hash, entry] = segments.as_slice() else {
             return KeyCategory::Unknown;
         };
-        let Some(subject) = parse_digest(algorithm, hash) else {
+        let Some(subject) = parse_sharded(algorithm, prefix, hash) else {
             return KeyCategory::Unknown;
         };
-        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
-            return KeyCategory::Unknown;
-        }
         let Some((r_algorithm, r_hash)) = entry.split_once('.') else {
             return KeyCategory::Unknown;
         };
@@ -391,6 +374,13 @@ fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
         namespace,
         artifact,
     }
+}
+
+/// A digest from its sharded segments `{alg}/{prefix}/{hash}`; `None` when the
+/// shard does not open the hash or the key cannot belong to this angos version.
+fn parse_sharded(algorithm: &str, prefix: &str, hash: &str) -> Option<Digest> {
+    let digest = parse_digest(algorithm, hash)?;
+    (hash.as_bytes().get(..2) == Some(prefix.as_bytes())).then_some(digest)
 }
 
 /// A digest from separate path segments; `None` means the key cannot belong

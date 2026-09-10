@@ -38,7 +38,8 @@ use crate::registry::{
 const PEEK_FRAME_SIZE: usize = 8 * 1024;
 
 /// How an append seeds its hasher.
-enum HashStart {
+#[derive(Debug)]
+pub enum HashStart {
     /// Rebuild every supported algorithm from the checkpoint, for a chunked
     /// upload whose target algorithm was unknown during PATCH.
     Resume,
@@ -47,40 +48,36 @@ enum HashStart {
     Fresh(Algorithm),
 }
 
-/// In-memory reconstruction of an upload's progress.
-#[derive(Debug, Clone)]
-pub struct UploadSessionRecord {
-    pub session_id: UploadSessionId,
-    pub namespace: Namespace,
-    /// Time of the last activity, refreshed on each write so prune's upload
-    /// sweep ages sessions on activity rather than creation.
-    pub started_at: DateTime<Utc>,
-    /// Hasher checkpoint after consuming `uploaded_size` bytes, so a crash
-    /// does not force re-reading them.
-    pub hash_context: Vec<u8>,
-    /// Bytes written and hashed so far.
-    pub uploaded_size: u64,
-}
-
-/// The wire shape of `session.json`.
+/// The durable `session.json`: an upload's progress as of its last write.
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
+    /// Refreshed on each write so prune's upload sweep ages sessions on
+    /// activity rather than creation.
     pub last_activity: DateTime<Utc>,
+    /// Bytes written and hashed so far.
     pub committed_offset: u64,
-    /// Base64 of the hasher checkpoint at `committed_offset`.
+    /// Base64 of the hasher checkpoint at `committed_offset`, so a crash does
+    /// not force re-reading those bytes.
     pub hash_state: String,
 }
 
-/// Decode `session.json` into `(last_activity, committed_offset, checkpoint)`.
-/// Any other shape reads as [`Error::Corrupt`], which prune's upload sweep
-/// treats as a session that can never complete.
-pub fn decode_session_file(raw: &[u8]) -> Result<(DateTime<Utc>, u64, Vec<u8>), Error> {
-    let file: SessionFile = serde_json::from_slice(raw)
-        .map_err(|e| Error::Corrupt(format!("upload session record: {e}")))?;
-    let hash_context = BASE64_STANDARD
-        .decode(&file.hash_state)
-        .map_err(|e| Error::Corrupt(format!("upload session hash state: {e}")))?;
-    Ok((file.last_activity, file.committed_offset, hash_context))
+impl SessionFile {
+    /// Decode `session.json`, checkpoint included. Any other shape reads as
+    /// [`Error::Corrupt`], which prune's upload sweep treats as a session that
+    /// can never complete.
+    pub fn decode(raw: &[u8]) -> Result<Self, Error> {
+        let file: Self = serde_json::from_slice(raw)
+            .map_err(|e| Error::Corrupt(format!("upload session record: {e}")))?;
+        file.hash_context()?;
+        Ok(file)
+    }
+
+    /// The hasher checkpoint at `committed_offset`.
+    fn hash_context(&self) -> Result<Vec<u8>, Error> {
+        BASE64_STANDARD
+            .decode(&self.hash_state)
+            .map_err(|e| Error::Corrupt(format!("upload session hash state: {e}")))
+    }
 }
 
 impl BlobStore {
@@ -88,33 +85,25 @@ impl BlobStore {
         &self,
         namespace: &Namespace,
         session_id: &UploadSessionId,
-    ) -> Result<UploadSessionRecord, Error> {
+    ) -> Result<SessionFile, Error> {
         let key = namespace.upload_session_path(session_id);
-        let raw = match self.object.get(&key).await {
-            Ok(raw) => raw,
-            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
-            Err(e) => return Err(e.into()),
-        };
-        let (last_activity, committed_offset, hash_context) = decode_session_file(&raw)?;
-        Ok(UploadSessionRecord {
-            session_id: session_id.clone(),
-            namespace: namespace.clone(),
-            started_at: last_activity,
-            hash_context,
-            uploaded_size: committed_offset,
-        })
+        match self.object.get(&key).await {
+            Ok(raw) => SessionFile::decode(&raw),
+            Err(StorageError::NotFound) => Err(Error::BlobUploadUnknown),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Persist `record` as one atomic `session.json` put.
-    async fn write_session(&self, record: &UploadSessionRecord) -> Result<(), Error> {
-        let key = record.namespace.upload_session_path(&record.session_id);
-        let file = SessionFile {
-            last_activity: record.started_at,
-            committed_offset: record.uploaded_size,
-            hash_state: BASE64_STANDARD.encode(&record.hash_context),
-        };
+    async fn write_session(
+        &self,
+        namespace: &Namespace,
+        session_id: &UploadSessionId,
+        record: &SessionFile,
+    ) -> Result<(), Error> {
+        let key = namespace.upload_session_path(session_id);
         self.object
-            .put(&key, Bytes::from(serde_json::to_vec(&file)?))
+            .put(&key, Bytes::from(serde_json::to_vec(record)?))
             .await?;
         Ok(())
     }
@@ -192,22 +181,18 @@ impl BlobStore {
             Some(algorithm) => Hasher::for_algorithm(algorithm),
             None => Hasher::new(),
         };
-        let hash_context = hasher.state().to_bytes()?;
-        let record = UploadSessionRecord {
-            session_id: session_id.clone(),
-            namespace: namespace.clone(),
-            started_at: Utc::now(),
-            hash_context,
-            uploaded_size: 0,
+        let record = SessionFile {
+            last_activity: Utc::now(),
+            committed_offset: 0,
+            hash_state: BASE64_STANDARD.encode(hasher.state().to_bytes()?),
         };
-        self.write_session(&record).await?;
-        Ok(())
+        self.write_session(namespace, session_id, &record).await
     }
 
-    /// Append the final chunk of a chunked upload and return its digest under
-    /// `algorithm` plus the total size. It resumes the multi-algorithm
-    /// checkpoint, so an upload whose algorithm was unknown during PATCH can
-    /// close under any supported one.
+    /// Append the final chunk and return its digest under `algorithm` plus the
+    /// total size. Resuming the checkpoint lets an upload whose algorithm was
+    /// unknown during PATCH close under any supported one; a fresh start hashes
+    /// a monolithic body under its one known algorithm.
     #[instrument(skip(self, stream))]
     pub async fn write_upload(
         &self,
@@ -215,39 +200,11 @@ impl BlobStore {
         session_id: &UploadSessionId,
         stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         content_length: Option<u64>,
+        start: HashStart,
         algorithm: Algorithm,
     ) -> Result<(Digest, u64), Error> {
         let (hasher, size) = self
-            .append(
-                namespace,
-                session_id,
-                stream,
-                content_length,
-                HashStart::Resume,
-            )
-            .await?;
-        Ok((hasher.digest(algorithm)?, size))
-    }
-
-    /// Write a monolithic upload whose `algorithm` is known up front and which
-    /// has no prior chunked writes, hashing only that target.
-    #[instrument(skip(self, stream))]
-    pub async fn write_monolithic_upload(
-        &self,
-        namespace: &Namespace,
-        session_id: &UploadSessionId,
-        stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
-        content_length: Option<u64>,
-        algorithm: Algorithm,
-    ) -> Result<(Digest, u64), Error> {
-        let (hasher, size) = self
-            .append(
-                namespace,
-                session_id,
-                stream,
-                content_length,
-                HashStart::Fresh(algorithm),
-            )
+            .append(namespace, session_id, stream, content_length, start)
             .await?;
         Ok((hasher.digest(algorithm)?, size))
     }
@@ -284,12 +241,12 @@ impl BlobStore {
     ) -> Result<(Hasher, u64), Error> {
         let mut record = self.read_session(namespace, session_id).await?;
         let hasher = match start {
-            HashStart::Resume => HashState::from_bytes(&record.hash_context)?.into_hasher()?,
+            HashStart::Resume => HashState::from_bytes(&record.hash_context()?)?.into_hasher()?,
             HashStart::Fresh(algorithm) => Hasher::for_algorithm(algorithm),
         };
 
         if content_length == Some(0) {
-            return Ok((hasher, record.uploaded_size));
+            return Ok((hasher, record.committed_offset));
         }
 
         // A chunked finalize with an empty body must short-circuit like the
@@ -302,7 +259,7 @@ impl BlobStore {
                 .await
                 .map_err(|e| Error::Internal(e.to_string()))?;
             if peek.is_empty() {
-                return Ok((hasher, record.uploaded_size));
+                return Ok((hasher, record.committed_offset));
             }
             Box::new(Cursor::new(peek.freeze()).chain(stream))
         } else {
@@ -325,10 +282,10 @@ impl BlobStore {
             (Err(e), Ok(_)) => return Err(e.into()),
         };
 
-        record.hash_context = hasher.state().to_bytes()?;
-        record.uploaded_size = new_size;
-        record.started_at = Utc::now();
-        self.write_session(&record).await?;
+        record.hash_state = BASE64_STANDARD.encode(hasher.state().to_bytes()?);
+        record.committed_offset = new_size;
+        record.last_activity = Utc::now();
+        self.write_session(namespace, session_id, &record).await?;
 
         Ok((hasher, new_size))
     }
@@ -341,8 +298,8 @@ impl BlobStore {
     ) -> Result<UploadSummary, Error> {
         let record = self.read_session(namespace, session_id).await?;
         Ok(UploadSummary {
-            size: record.uploaded_size,
-            started_at: record.started_at,
+            size: record.committed_offset,
+            started_at: record.last_activity,
         })
     }
 
@@ -366,11 +323,10 @@ impl BlobStore {
     ) -> Result<Digest, Error> {
         // The record's existence alone answers liveness, so a HEAD suffices.
         let session_key = namespace.upload_session_path(session_id);
-        match self.object.head(&session_key).await {
-            Ok(_) => self.object.delete(&session_key).await?,
-            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
-            Err(e) => return Err(e.into()),
+        if !self.object.exists(&session_key).await? {
+            return Err(Error::BlobUploadUnknown);
         }
+        self.object.delete(&session_key).await?;
 
         let upload_key = namespace.upload_path(session_id);
         self.object.complete_upload(&upload_key).await?;

@@ -1,13 +1,6 @@
-use std::{
-    borrow::Borrow,
-    fmt::{Display, Formatter},
-    ops::Deref,
-    str::FromStr,
-    sync::LazyLock,
-};
+use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::types::Error;
 use crate::types::constants::{
@@ -34,16 +27,11 @@ static MEDIA_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 pub struct MediaType(String);
 
 impl MediaType {
-    /// The single validation predicate shared by every constructor.
-    fn is_valid(s: &str) -> bool {
-        MEDIA_TYPE_REGEX.is_match(s)
-    }
-
     /// # Errors
     ///
     /// Returns an error when `s` is not a `type/subtype` media type.
     pub fn new(s: &str) -> Result<Self, Error> {
-        if Self::is_valid(s) {
+        if MEDIA_TYPE_REGEX.is_match(s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(Error::InvalidMediaType(s.to_string()))
@@ -94,105 +82,12 @@ impl MediaType {
     }
 }
 
-impl FromStr for MediaType {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl TryFrom<String> for MediaType {
-    type Error = Error;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        if Self::is_valid(&s) {
-            Ok(Self(s))
-        } else {
-            Err(Error::InvalidMediaType(s))
-        }
-    }
-}
-
-impl TryFrom<&str> for MediaType {
-    type Error = Error;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl Display for MediaType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for MediaType {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for MediaType {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Borrow<str> for MediaType {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl PartialEq<str> for MediaType {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl PartialEq<&str> for MediaType {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialEq<String> for MediaType {
-    fn eq(&self, other: &String) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialEq<MediaType> for String {
-    fn eq(&self, other: &MediaType) -> bool {
-        self == &other.0
-    }
-}
-
-impl Serialize for MediaType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for MediaType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::try_from(s).map_err(serde::de::Error::custom)
-    }
-}
+str_newtype!(MediaType);
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use crate::types::media_type::*;
 
     #[test]

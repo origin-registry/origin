@@ -40,6 +40,50 @@ async fn test_shutdown_completes_in_flight_async_delivery() {
     );
 }
 
+/// A configuration reload builds a new dispatcher and drops the old one. The
+/// deliveries the old one still has in flight belong to events already
+/// performed, so they must outlive it rather than be cancelled with it.
+#[tokio::test]
+async fn a_displaced_dispatcher_still_delivers_what_it_had_in_flight() {
+    let server = MockServer::start().await;
+    let event = create_test_event();
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let dispatcher = single_hook_dispatcher(
+        "displaced-hook",
+        &server.uri(),
+        DeliveryPolicy::Async,
+        None,
+        0,
+    );
+    dispatcher.dispatch(&event).await.unwrap();
+
+    // The reload's drop, before the delivery task has had a chance to run.
+    drop(dispatcher);
+
+    for _ in 0..100 {
+        if !server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "a delivery in flight must survive the dispatcher being displaced"
+    );
+}
+
 #[tokio::test]
 async fn test_shutdown_rejects_new_async_dispatches() {
     let server = MockServer::start().await;

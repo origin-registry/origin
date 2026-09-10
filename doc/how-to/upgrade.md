@@ -731,3 +731,24 @@ instead of deleting them once past the grace period. A store scrubbed on 1.6.x
 has none. If yours does, note that quarantine copies the object before removing
 the original, and `.tx-bodies/` can hold large staged upload bodies: either run
 `angos scrub` on 1.6.x first, or delete the three prefixes by hand.
+
+---
+
+## 1.7.x → 1.7.2
+
+### `immutable_tags` Refuses Only an Overwrite
+
+`immutable_tags` used to refuse every push naming a protected tag, including
+the first one that created it and a re-push of the content it already held.
+That contradicted its own how-to, and made a release tag impossible to publish
+while the flag was on. A push is now refused only when the tag already exists
+and points at a different digest.
+
+**Who is affected:** deployments relying on the old behaviour as a blanket
+"no pushes to these tags" rule. Creating a protected tag now succeeds, so a
+workflow that expected a `409` for a first push gets a `201`.
+
+#### Migration
+
+None. To keep a tag unwritable altogether, deny the push at the authorization
+layer instead: `immutable_tags` protects content, not the namespace.

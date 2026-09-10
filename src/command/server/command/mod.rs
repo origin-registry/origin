@@ -37,10 +37,10 @@ impl ServiceListener {
         }
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self, grace: Duration) {
         match self {
-            Self::Insecure(listener) => listener.shutdown().await,
-            Self::Secure(listener) => listener.shutdown().await,
+            Self::Insecure(listener) => listener.shutdown(grace).await,
+            Self::Secure(listener) => listener.shutdown(grace).await,
         }
     }
 }
@@ -73,7 +73,7 @@ pub struct Command {
 
 impl Command {
     pub async fn new(config: &Configuration) -> Result<Command, Error> {
-        let auth_cache = bootstrap::auth_cache(&config.cache)?;
+        let auth_cache = config.cache.to_backend().map_err(bootstrap::Error::Cache)?;
         let BuiltRegistry {
             registry,
             depth_refresh,
@@ -118,7 +118,7 @@ impl Command {
     }
 
     pub async fn notify_config_change(&self, config: &Configuration) -> Result<(), Error> {
-        let auth_cache = bootstrap::auth_cache(&config.cache)?;
+        let auth_cache = config.cache.to_backend().map_err(bootstrap::Error::Cache)?;
         let BuiltRegistry {
             registry,
             depth_refresh,
@@ -186,7 +186,9 @@ impl Command {
     }
 
     pub async fn shutdown_with_timeout(&self, grace: Duration) {
-        self.listener.shutdown().await;
+        // Stops accepting first, so the in-flight exchanges drain against a
+        // server nothing new is arriving at.
+        self.listener.shutdown(grace).await;
         // Cancellation races only the claim, so this drains the job in flight
         // rather than killing it at process exit.
         self.in_process_loops

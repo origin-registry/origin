@@ -184,12 +184,12 @@ async fn worker_loop(
 
 #[async_trait]
 impl ConfigNotifier for Command {
-    async fn notify_config_change(&self, config: &Configuration) {
+    async fn notify_config_change(&self, config: &Configuration) -> bool {
         let context = match WorkerContext::build(config).await {
             Ok(context) => context,
             Err(e) => {
                 error!("Failed to rebuild worker context on reload: {e}");
-                return;
+                return false;
             }
         };
         for runner in &self.queues {
@@ -197,6 +197,7 @@ impl ConfigNotifier for Command {
                 .inner
                 .store(Arc::new(context.components_for(runner.queue)));
         }
+        true
     }
 
     fn notify_tls_config_change(&self, _tls: &ServerTlsConfig) {
@@ -238,8 +239,8 @@ impl WorkerContext {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            Arc::new(JobStore::alongside_with_retry_policy(
-                &metadata_store,
+            Arc::new(JobStore::with_retry_policy(
+                metadata_store.object_store().clone(),
                 "worker",
                 claim_mode,
                 retry_policy,
@@ -259,8 +260,8 @@ impl WorkerContext {
     /// A fresh `JobStore` consumer over the shared storage, plus the handler
     /// bound to `queue`.
     fn components_for(&self, queue: Queue) -> Components {
-        let consumer = Arc::new(JobStore::alongside_with_retry_policy(
-            &self.metadata_store,
+        let consumer = Arc::new(JobStore::with_retry_policy(
+            self.metadata_store.object_store().clone(),
             Uuid::new_v4().to_string(),
             self.claim_mode,
             self.retry_policy,
@@ -363,8 +364,8 @@ mod tests {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            RegistryConfig::new(Arc::new(JobStore::alongside(
-                &metadata_store,
+            RegistryConfig::new(Arc::new(JobStore::new(
+                metadata_store.object_store().clone(),
                 "worker-test",
                 ClaimMode::Atomic,
             ))),

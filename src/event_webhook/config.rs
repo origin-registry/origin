@@ -12,14 +12,19 @@ pub enum DeliveryPolicy {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(try_from = "EventWebhookConfigFields")]
 pub struct EventWebhookConfig {
     pub url: Url,
     pub policy: DeliveryPolicy,
+    #[serde(default, deserialize_with = "deserialize_token")]
     pub token: Option<Secret<String>>,
+    #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    pub max_retries: u32,
+    /// The explicit retry budget; [`Self::max_retries`] fills in the policy's
+    /// default when absent.
+    #[serde(default, deserialize_with = "deserialize_max_retries")]
+    pub max_retries: Option<u32>,
     pub events: Vec<EventKind>,
+    #[serde(default)]
     pub repository_filter: Option<Vec<RegexPattern>>,
 }
 
@@ -28,42 +33,12 @@ pub struct EventWebhookConfig {
 /// backed-off retry burst runs first. Other policies default to no retries.
 const REQUIRED_POLICY_DEFAULT_MAX_RETRIES: u32 = 3;
 
-#[derive(Deserialize)]
-struct EventWebhookConfigFields {
-    url: Url,
-    policy: DeliveryPolicy,
-    #[serde(default, deserialize_with = "deserialize_token")]
-    token: Option<Secret<String>>,
-    #[serde(default = "default_timeout_ms")]
-    timeout_ms: u64,
-    #[serde(default, deserialize_with = "deserialize_max_retries")]
-    max_retries: Option<u32>,
-    events: Vec<EventKind>,
-    #[serde(default)]
-    repository_filter: Option<Vec<RegexPattern>>,
-}
-
-impl TryFrom<EventWebhookConfigFields> for EventWebhookConfig {
-    type Error = String;
-
-    fn try_from(fields: EventWebhookConfigFields) -> Result<Self, Self::Error> {
-        if fields.events.is_empty() {
-            return Err("event webhook must have at least one event".to_string());
-        }
-
-        let max_retries = fields.max_retries.unwrap_or(match fields.policy {
+impl EventWebhookConfig {
+    #[must_use]
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries.unwrap_or(match self.policy {
             DeliveryPolicy::Required => REQUIRED_POLICY_DEFAULT_MAX_RETRIES,
             DeliveryPolicy::Optional | DeliveryPolicy::Async => 0,
-        });
-
-        Ok(Self {
-            url: fields.url,
-            policy: fields.policy,
-            token: fields.token,
-            timeout_ms: fields.timeout_ms,
-            max_retries,
-            events: fields.events,
-            repository_filter: fields.repository_filter,
         })
     }
 }
@@ -132,7 +107,7 @@ mod tests {
             Some("secret-token")
         );
         assert_eq!(config.timeout_ms, 10000);
-        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.max_retries(), 3);
         assert_eq!(config.events.len(), 2);
         assert_eq!(config.events[0], EventKind::ManifestPush);
         assert_eq!(config.events[1], EventKind::TagCreate);
@@ -158,7 +133,7 @@ mod tests {
         assert_eq!(config.policy, DeliveryPolicy::Optional);
         assert_eq!(config.token, None);
         assert_eq!(config.timeout_ms, 5000);
-        assert_eq!(config.max_retries, 0);
+        assert_eq!(config.max_retries(), 0);
         assert_eq!(config.events.len(), 1);
         assert_eq!(config.events[0], EventKind::BlobPush);
         assert_eq!(config.repository_filter, None);
@@ -219,22 +194,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_events_fail_at_deserialize_time() {
-        let toml = r#"
-            url = "https://example.com/webhook"
-            policy = "required"
-            events = []
-        "#;
-
-        let err = toml::from_str::<EventWebhookConfig>(toml).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("event webhook must have at least one event"),
-            "unexpected error: {err}"
-        );
-    }
-
     /// A `required`-policy webhook without an explicit `max_retries` gets the
     /// short default burst; an explicit zero is respected.
     #[test]
@@ -245,7 +204,7 @@ mod tests {
             events = ["manifest.push"]
         "#;
         let config: EventWebhookConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.max_retries(), 3);
 
         let toml = r#"
             url = "https://example.com/webhook"
@@ -254,7 +213,7 @@ mod tests {
             max_retries = 0
         "#;
         let config: EventWebhookConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.max_retries, 0, "an explicit zero must win");
+        assert_eq!(config.max_retries(), 0, "an explicit zero must win");
     }
 
     #[test]
@@ -267,7 +226,7 @@ mod tests {
         "#;
 
         let config: EventWebhookConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.max_retries, 16);
+        assert_eq!(config.max_retries(), 16);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt, stream::try_unfold};
-use tempfile::Builder as TempFileBuilder;
+use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 use tokio::{
     fs,
     io::{AsyncSeekExt, AsyncWriteExt},
@@ -238,6 +238,23 @@ fn backend_error(op: &str, path: &Path, error: &io::Error) -> Error {
     }
 }
 
+/// A temp file beside the objects of `parent`, filled by `fill` and synced
+/// when asked, ready to be persisted or linked into place.
+fn staged_file(
+    parent: &Path,
+    sync: bool,
+    fill: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<NamedTempFile> {
+    let mut temp = TempFileBuilder::new()
+        .prefix(ATOMIC_WRITE_TMP_PREFIX)
+        .tempfile_in(parent)?;
+    fill(temp.as_file_mut())?;
+    if sync {
+        temp.as_file().sync_all()?;
+    }
+    Ok(temp)
+}
+
 async fn atomic_write(target: &Path, data: Bytes, sync: bool) -> Result<(), Error> {
     // A concurrent `delete` can prune the parent directory between
     // `ensure_parent` and temp-file creation (see `prune_empty_ancestors`).
@@ -251,15 +268,9 @@ async fn atomic_write(target: &Path, data: Bytes, sync: bool) -> Result<(), Erro
         let final_path = target.to_owned();
         let body = data.clone();
         let result = spawn_blocking(move || -> io::Result<()> {
-            let mut temp = TempFileBuilder::new()
-                .prefix(ATOMIC_WRITE_TMP_PREFIX)
-                .tempfile_in(&parent)?;
-            temp.write_all(&body)?;
-            if sync {
-                temp.flush()?;
-                temp.as_file().sync_all()?;
-            }
-            temp.persist(final_path).map_err(|e| e.error)?;
+            staged_file(&parent, sync, |file| file.write_all(&body))?
+                .persist(final_path)
+                .map_err(|e| e.error)?;
             Ok(())
         })
         .await
@@ -276,6 +287,18 @@ async fn atomic_write(target: &Path, data: Bytes, sync: bool) -> Result<(), Erro
             }
         }
     }
+}
+
+/// Split directory entries into `(sub_prefixes, objects)` by file type.
+fn partition_entries(
+    entries: impl IntoIterator<Item = (String, FileType)>,
+) -> (Vec<String>, Vec<String>) {
+    let (dirs, files): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|(_, file_type)| file_type.is_dir());
+    let names =
+        |entries: Vec<(String, FileType)>| entries.into_iter().map(|(name, _)| name).collect();
+    (names(dirs), names(files))
 }
 
 /// Sorted list of immediate entries; missing dir yields an empty vector.
@@ -375,17 +398,8 @@ impl ObjectStore for Backend {
         spawn_blocking(move || -> Result<bool, Error> {
             // `link(2)` is the atomic create-if-absent that also holds on
             // NFS: the temp file is fully written before the name appears.
-            let mut temp = TempFileBuilder::new()
-                .prefix(ATOMIC_WRITE_TMP_PREFIX)
-                .tempfile_in(&parent)
+            let temp = staged_file(&parent, sync, |file| file.write_all(&data))
                 .map_err(|e| backend_error("create_if_absent", &target, &e))?;
-            temp.write_all(&data)
-                .map_err(|e| backend_error("create_if_absent", &target, &e))?;
-            if sync {
-                temp.as_file()
-                    .sync_all()
-                    .map_err(|e| backend_error("create_if_absent", &target, &e))?;
-            }
             match std::fs::hard_link(temp.path(), &target) {
                 Ok(()) => Ok(true),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
@@ -496,15 +510,7 @@ impl ObjectStore for Backend {
         let upper = (lower + n as usize).min(entries.len());
         let slice = &entries[lower..upper];
 
-        let mut sub_prefixes = Vec::new();
-        let mut objects = Vec::new();
-        for (name, file_type) in slice {
-            if file_type.is_dir() {
-                sub_prefixes.push(name.clone());
-            } else {
-                objects.push(name.clone());
-            }
-        }
+        let (sub_prefixes, objects) = partition_entries(slice.iter().cloned());
 
         let next_token = (upper < entries.len())
             .then(|| slice.last().map(|(name, _)| name.clone()))
@@ -521,15 +527,7 @@ impl ObjectStore for Backend {
     /// the directory once per page.
     async fn list_all_children(&self, prefix: &str) -> Result<Children, Error> {
         let entries = read_dir_sorted(&self.full_path(prefix)).await?;
-        let mut sub_prefixes = Vec::new();
-        let mut objects = Vec::new();
-        for (name, file_type) in entries {
-            if file_type.is_dir() {
-                sub_prefixes.push(name);
-            } else {
-                objects.push(name);
-            }
-        }
+        let (sub_prefixes, objects) = partition_entries(entries);
         Ok(Children {
             sub_prefixes,
             objects,
@@ -547,19 +545,12 @@ impl ObjectStore for Backend {
         // (a multi-GB blob would otherwise spike RSS by its whole size).
         match spawn_blocking(move || -> Result<(), Error> {
             let mut reader = File::open(&src).map_err(|e| backend_error("copy from", &src, &e))?;
-            let mut temp = TempFileBuilder::new()
-                .prefix(ATOMIC_WRITE_TMP_PREFIX)
-                .tempfile_in(&parent)
-                .map_err(|e| backend_error("copy to", &dst, &e))?;
-            io::copy(&mut reader, temp.as_file_mut())
-                .map_err(|e| backend_error("copy to", &dst, &e))?;
-            if sync {
-                temp.as_file()
-                    .sync_all()
-                    .map_err(|e| backend_error("copy to", &dst, &e))?;
-            }
-            temp.persist(&dst)
-                .map_err(|e| backend_error("copy to", &dst, &e.error))?;
+            staged_file(&parent, sync, |file| {
+                io::copy(&mut reader, file).map(|_| ())
+            })
+            .map_err(|e| backend_error("copy to", &dst, &e))?
+            .persist(&dst)
+            .map_err(|e| backend_error("copy to", &dst, &e.error))?;
             Ok(())
         })
         .await
@@ -615,6 +606,11 @@ impl ObjectStore for Backend {
             )));
         }
         file.flush().await?;
+        // The bytes are the object: a manifest committed over an upload the
+        // page cache had not written back would name a truncated blob.
+        if self.sync_to_disk {
+            file.sync_all().await?;
+        }
         current
             .checked_add(written)
             .ok_or_else(|| Error::Backend("upload size overflow".to_string()))

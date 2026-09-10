@@ -22,14 +22,6 @@ use crate::registry::{
 /// Keys fetched per page when listing a blob's reference directory.
 const REF_LIST_PAGE: u16 = 1000;
 
-fn non_empty_links_or_not_found(links: HashSet<LinkKind>) -> Result<HashSet<LinkKind>, Error> {
-    if links.is_empty() {
-        Err(Error::NotFound)
-    } else {
-        Ok(links)
-    }
-}
-
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct BlobIndex {
     pub namespace: HashMap<Namespace, HashSet<LinkKind>>,
@@ -67,13 +59,8 @@ pub async fn namespace_ref_entries(
     digest: &Digest,
 ) -> Result<HashSet<LinkKind>, Error> {
     let mut links = HashSet::new();
-    let own = digest.blob_ref_own_path(namespace);
-    match store.head(&own).await {
-        Ok(_) => {
-            links.insert(LinkKind::Blob(digest.clone()));
-        }
-        Err(StorageError::NotFound) => {}
-        Err(e) => return Err(e.into()),
+    if store.exists(&digest.blob_ref_own_path(namespace)).await? {
+        links.insert(LinkKind::Blob(digest.clone()));
     }
     let dir = digest.blob_ref_namespace_dir(namespace);
     let mut token = None;
@@ -116,12 +103,10 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<bool, Error> {
-        let own = digest.blob_ref_own_path(namespace);
-        match self.object_store().head(&own).await {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
+        Ok(self
+            .object_store()
+            .exists(&digest.blob_ref_own_path(namespace))
+            .await?)
     }
 
     /// Revoke `namespace`'s ownership of `digest`, the only reference removal
@@ -174,7 +159,10 @@ impl MetadataStore {
         digest: &Digest,
     ) -> Result<HashSet<LinkKind>, Error> {
         let links = namespace_ref_entries(self.object_store(), namespace, digest).await?;
-        non_empty_links_or_not_found(links)
+        if links.is_empty() {
+            return Err(Error::NotFound);
+        }
+        Ok(links)
     }
 
     /// Whether the link behind a reference entry still backs it: a tag,
@@ -187,26 +175,21 @@ impl MetadataStore {
         link: &LinkKind,
         blob: &Digest,
     ) -> Result<bool, Error> {
-        match link {
-            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => {
-                match self.read_link_reference(namespace, link).await {
-                    Ok(metadata) => Ok(&metadata.target == blob),
-                    Err(Error::NotFound) => Ok(false),
-                    Err(e) => Err(e),
-                }
-            }
-            LinkKind::ReferencedBy(referrer) => {
-                let revision = LinkKind::Digest(referrer.clone());
-                match self.read_link_reference(namespace, &revision).await {
-                    Ok(_) => Ok(true),
-                    Err(Error::NotFound) => Ok(false),
-                    Err(e) => Err(e),
-                }
-            }
+        let backing = match link {
+            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => link.clone(),
+            LinkKind::ReferencedBy(referrer) => LinkKind::Digest(referrer.clone()),
             // A layer, config or index-child entry converted out of a legacy
             // shard: its pin now lives in the referring revision's
             // `ReferencedBy` entry, so nothing backs this one.
-            _ => Ok(false),
+            _ => return Ok(false),
+        };
+        match self.read_link_reference(namespace, &backing).await {
+            // The referring revision resolving is all a per-referrer entry needs.
+            Ok(metadata) => {
+                Ok(matches!(link, LinkKind::ReferencedBy(_)) || &metadata.target == blob)
+            }
+            Err(Error::NotFound) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 

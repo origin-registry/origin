@@ -18,7 +18,7 @@ use crate::{
     configuration::RegexPattern,
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::Error,
-    registry_client::{FetchedBlob, RegistryClient},
+    registry_client::{Error as ClientError, FetchedBlob, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -172,27 +172,23 @@ async fn build_downstreams(
             // A URL path replaces this repository's prefix; a bare host mirrors
             // the namespace verbatim (no strip).
             let local_namespace = target_namespace.as_ref().map(|_| repo_name.clone());
-            downstreams.push(
-                ReplicationDownstream::builder(
-                    config.name.clone(),
-                    Arc::new(registry_client),
-                    config
-                        .max_concurrent_pushes
-                        .map_or(DEFAULT_MAX_CONCURRENT_PUSHES, NonZeroUsize::get),
-                )
-                .namespace_mapping(local_namespace, target_namespace)
-                .mode(config.mode)
-                .namespace_filter(
-                    config
-                        .namespace_filter
-                        .iter()
-                        .cloned()
-                        .map(RegexPattern::into_regex)
-                        .collect(),
-                )
-                .prune(config.prune)
-                .build(),
-            );
+            downstreams.push(ReplicationDownstream {
+                name: config.name.clone(),
+                registry_client: Arc::new(registry_client),
+                mode: config.mode,
+                namespace_filter: config
+                    .namespace_filter
+                    .iter()
+                    .cloned()
+                    .map(RegexPattern::into_regex)
+                    .collect(),
+                max_concurrent_pushes: config
+                    .max_concurrent_pushes
+                    .map_or(DEFAULT_MAX_CONCURRENT_PUSHES, NonZeroUsize::get),
+                prune: config.prune,
+                local_namespace,
+                target_namespace,
+            });
         }
         Ok::<_, Error>(downstreams)
     })
@@ -248,17 +244,23 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Runs `op` against each upstream in turn, the namespace mapped to that
+    /// upstream's form, and answers with the first success or `fallback`.
     async fn try_upstreams<'a, F, T>(
         &'a self,
         namespace: &'a Namespace,
         fallback: Error,
-        mut op: F,
+        op: F,
     ) -> Result<T, Error>
     where
-        F: FnMut(&'a Upstream) -> BoxFuture<'a, Result<T, Error>>,
+        F: Fn(&'a RegistryClient, Namespace) -> BoxFuture<'a, Result<T, ClientError>>,
     {
         for upstream in &self.upstreams {
-            match op(upstream).await {
+            let result = match upstream.remote(namespace) {
+                Ok(remote) => op(&upstream.client, remote).await.map_err(Error::from),
+                Err(error) => Err(error.into()),
+            };
+            match result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     warn!(
@@ -334,18 +336,12 @@ impl Repository {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(Digest, u64), Error> {
-        self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
-            Box::pin(async move {
-                let remote = upstream.remote(namespace)?;
-                Ok(upstream
-                    .client
-                    .head_blob(HeadBlobRequest {
-                        namespace: remote,
-                        digest: digest.clone(),
-                        accepted_types: accepted_types.to_vec(),
-                    })
-                    .await?)
-            })
+        self.try_upstreams(namespace, Error::BlobUnknown, |client, remote| {
+            Box::pin(client.head_blob(HeadBlobRequest {
+                namespace: remote,
+                digest: digest.clone(),
+                accepted_types: accepted_types.to_vec(),
+            }))
         })
         .await
     }
@@ -359,19 +355,13 @@ impl Repository {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Vec<Descriptor>, Error> {
-        self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
-            Box::pin(async move {
-                let remote = upstream.remote(namespace)?;
-                Ok(upstream
-                    .client
-                    .list_referrers(GetReferrersRequest {
-                        namespace: remote,
-                        digest: digest.clone(),
-                        artifact_type: None,
-                        last: None,
-                    })
-                    .await?)
-            })
+        self.try_upstreams(namespace, Error::ManifestUnknown, |client, remote| {
+            Box::pin(client.list_referrers(GetReferrersRequest {
+                namespace: remote,
+                digest: digest.clone(),
+                artifact_type: None,
+                last: None,
+            }))
         })
         .await
     }
@@ -386,19 +376,13 @@ impl Repository {
         digest: &Digest,
         range: Option<RequestRange>,
     ) -> Result<FetchedBlob, Error> {
-        self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
-            Box::pin(async move {
-                let remote = upstream.remote(namespace)?;
-                Ok(upstream
-                    .client
-                    .get_blob(GetBlobRequest {
-                        namespace: remote,
-                        digest: digest.clone(),
-                        accepted_types: accepted_types.to_vec(),
-                        range,
-                    })
-                    .await?)
-            })
+        self.try_upstreams(namespace, Error::BlobUnknown, |client, remote| {
+            Box::pin(client.get_blob(GetBlobRequest {
+                namespace: remote,
+                digest: digest.clone(),
+                accepted_types: accepted_types.to_vec(),
+                range,
+            }))
         })
         .await
     }
@@ -410,18 +394,12 @@ impl Repository {
         namespace: &Namespace,
         reference: &Reference,
     ) -> Result<ManifestHeadResponse, Error> {
-        self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
-            Box::pin(async move {
-                let remote = upstream.remote(namespace)?;
-                Ok(upstream
-                    .client
-                    .head_manifest(HeadManifestRequest {
-                        namespace: remote,
-                        reference: reference.clone(),
-                        accepted_types: accepted_types.to_vec(),
-                    })
-                    .await?)
-            })
+        self.try_upstreams(namespace, Error::ManifestUnknown, |client, remote| {
+            Box::pin(client.head_manifest(HeadManifestRequest {
+                namespace: remote,
+                reference: reference.clone(),
+                accepted_types: accepted_types.to_vec(),
+            }))
         })
         .await
     }
@@ -433,18 +411,12 @@ impl Repository {
         namespace: &Namespace,
         reference: &Reference,
     ) -> Result<ManifestResponse, Error> {
-        self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
-            Box::pin(async move {
-                let remote = upstream.remote(namespace)?;
-                Ok(upstream
-                    .client
-                    .get_manifest(GetManifestRequest {
-                        namespace: remote,
-                        reference: reference.clone(),
-                        accepted_types: accepted_types.to_vec(),
-                    })
-                    .await?)
-            })
+        self.try_upstreams(namespace, Error::ManifestUnknown, |client, remote| {
+            Box::pin(client.get_manifest(GetManifestRequest {
+                namespace: remote,
+                reference: reference.clone(),
+                accepted_types: accepted_types.to_vec(),
+            }))
         })
         .await
     }

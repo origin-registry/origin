@@ -151,16 +151,8 @@ impl Digest {
     /// The digest of `bytes` under `algorithm`, computed in one shot.
     pub fn from_bytes(algorithm: Algorithm, bytes: impl AsRef<[u8]>) -> Self {
         match algorithm {
-            Algorithm::Sha256 => {
-                let mut hasher = Sha256::new();
-                hasher.update(bytes.as_ref());
-                Self::from_finalized(Algorithm::Sha256, hasher.finalize())
-            }
-            Algorithm::Sha512 => {
-                let mut hasher = Sha512::new();
-                hasher.update(bytes.as_ref());
-                Self::from_finalized(Algorithm::Sha512, hasher.finalize())
-            }
+            Algorithm::Sha256 => Self::from_finalized(algorithm, Sha256::digest(bytes)),
+            Algorithm::Sha512 => Self::from_finalized(algorithm, Sha512::digest(bytes)),
         }
     }
 

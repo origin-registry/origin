@@ -18,11 +18,8 @@ use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     registry::{
-        Error as RegistryError,
-        blob::cache_blob,
-        blob_ownership::{BlobOwnership, GrantOutcome},
-        blob_store::BlobStore,
-        metadata_store::MetadataStore,
+        Error as RegistryError, blob::cache_blob, blob_ownership::GrantOutcome,
+        blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
     },
 };
@@ -45,8 +42,7 @@ pub const CACHE_ACTOR: &str = "cache";
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheFetchBlobPayload {
     pub namespace: Namespace,
-    /// Serialized OCI digest, e.g. `sha256:abc...`.
-    pub digest: String,
+    pub digest: Digest,
 }
 
 /// Builds a [`JobEnvelope`] for a cache-fill job, keyed on
@@ -59,7 +55,7 @@ pub struct CacheFetchBlobPayload {
 pub fn build_envelope(namespace: &Namespace, digest: &Digest) -> Result<JobEnvelope, Error> {
     let payload = CacheFetchBlobPayload {
         namespace: namespace.clone(),
-        digest: digest.to_string(),
+        digest: digest.clone(),
     };
     JobEnvelope::new(
         Queue::Cache,
@@ -122,7 +118,8 @@ impl CacheFillJobHandler {
         // grant falls through to the fetch, whose fresh bytes are grace-protected.
         let granted = match self.blob_store.size(digest).await {
             Ok(_) => {
-                BlobOwnership::new(self.metadata_store.as_ref())
+                self.metadata_store
+                    .as_ref()
                     .grant_existing(&self.blob_store, namespace, digest)
                     .await?
                     == GrantOutcome::Granted
@@ -170,12 +167,7 @@ impl JobHandler for CacheFillJobHandler {
         let payload: CacheFetchBlobPayload = serde_json::from_value(envelope.payload.clone())
             .map_err(|e| Error::Execution(format!("failed to deserialize job payload: {e}")))?;
 
-        let digest: Digest = payload
-            .digest
-            .parse()
-            .map_err(|e| Error::Execution(format!("invalid digest '{}': {e}", payload.digest)))?;
-
-        self.fill(&payload.namespace, &digest)
+        self.fill(&payload.namespace, &payload.digest)
             .await
             .map_err(job_error)?;
 

@@ -9,6 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `blob_stream_frame_size` (default `128KiB`) sets the read buffer each frame of a streamed blob response is filled from, replacing a fixed 4 KiB frame that cost a quarter of a million allocations and body writes per GiB served.
+- The `/v2/_angos/<name>/namespaces/list` platform object carries the `os.version`, `os.features` and `features` an image index declares, where it previously kept only `os`, `architecture` and `variant`.
+
+### Changed
+
+- A zero in a setting that must be positive, such as `query_timeout` or `max_concurrent_cache_jobs`, and a value under the `claim_ttl_secs` or `pending_refresh_interval_secs` floor are reported by the TOML parser at the offending key rather than by a per-field message.
 
 ### Fixed
 
@@ -23,6 +28,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A push slower than roughly 175 KB/s no longer times out against S3 and trips the circuit breaker for every other request, because a streamed part upload carries no S3-side deadline: the pushing client paces it.
 - A response whose `Content-Length` exceeds what the allocator can serve fails the request instead of aborting the process, since the header no longer sizes the buffer it is collected into.
 - An upstream token endpoint answering with an absurd `expires_in` no longer panics the task that caches the token, which on `angos worker` cost a worker slot per such response.
+- `angos prune` leaves a manifest revision alone while its record is younger than `gc_grace_secs`, so retention and orphan-namespace clearing no longer delete the platform manifests of a multi-arch push before the index that names them lands.
+- A retention tag deletion re-reads the tag and skips it when it points somewhere else by then, so a re-push landing between the policy snapshot and the delete is no longer swept away.
+- The in-flight window that shields a push from the grant sweep is measured on the ownership grant rather than on the bytes it names, so a cross-repository mount of an old blob is no longer revoked mid-push.
+- A finished reclamation run expires its `v2/gc/` marker a few seconds after the delete instead of removing it at once, so a push whose reference landed after the run's last liveness check backs off rather than committing a manifest onto reclaimed bytes.
+- `sync_to_disk = true` now covers uploaded blob bytes, which were only flushed to the page cache, so a power loss can no longer leave a manifest pointing at a truncated blob.
+- A lost response to `CreateMultipartUpload` is no longer replayed, where the replay could leave two open uploads for one key and fail the push at completion.
+- A batch-delete error carrying no message fails the delete instead of reading as success, so `delete_prefix` no longer reports a prefix as emptied when it is not.
+- `ListMultipartUploads` is scoped to the configured `key_prefix`, so upload cleanup on a shared bucket no longer sees another tenant's in-flight uploads.
+- A 409 `ConditionalRequestConflict` from S3 is retried as the protocol defines rather than read as "the object already exists", where a scrub demotion could delete a tag-history entry it had never copied.
+- A refused S3 request (a denied action, a malformed request) no longer counts as a circuit-breaker failure, so one denied IAM action can no longer open the breaker and fail every other operation.
+- An S3 response carrying no `content-length` is an error rather than an empty object, which a `HEAD` reported as a zero-byte blob and a `GET` served truncated.
+- `circuit_breaker_threshold = 0` and zero operation timeouts are rejected at startup, where they left the client answering nothing at all.
+- The circuit breaker measures its cooldown on a monotonic clock, so a wall-clock step no longer stretches or skips it.
+- Revision and referrer records honour `link_cache_ttl` like every other link instead of being cached for a year, so a manifest deleted on one replica or by `angos prune` stops answering `HEAD` and `GET` by digest on the others once the TTL elapses.
+- A shutdown stops accepting and lets the requests in flight finish within `shutdown_drain_secs`, where connection tasks were detached and every in-flight `PATCH` or `PUT` was cut with a TCP reset when the runtime went down.
+- A configuration reload no longer cancels the asynchronous webhook deliveries the displaced dispatcher had in flight, retries included, which went unlogged.
+- A configuration the server refused is no longer cached by the file watcher, where a later certificate rotation would rebuild TLS from paths that never took effect.
+- A local tag push or delete is stamped one millisecond above the entry it supersedes, so a replica whose peer's clock runs ahead no longer answers `201` or `202` for a write that lands as the loser and leaves the tag unmoved.
+- `immutable_tags` refuses a push only when the tag already points at different content, so the first push of a protected tag and a re-push of what it holds now succeed, as its how-to always described.
 
 ## 1.7.1
 

@@ -105,6 +105,15 @@ pub trait ObjectStore: Send + Sync {
     /// last-modified timestamp without reading the body.
     async fn head(&self, key: &str) -> Result<ObjectMeta, Error>;
 
+    /// Whether `key` holds an object: a `head` that reads `NotFound` as `false`.
+    async fn exists(&self, key: &str) -> Result<bool, Error> {
+        match self.head(key).await {
+            Ok(_) => Ok(true),
+            Err(Error::NotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Flat-recursive enumeration: returns up to `n` keys under `prefix`,
     /// without grouping by `/`. Pass `token` from the previous call to
     /// resume.

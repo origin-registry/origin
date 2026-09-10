@@ -9,7 +9,6 @@ use futures_util::TryStreamExt;
 use tracing::{debug, error, info, warn};
 
 use angos_oci::{Digest, Namespace, UploadSessionId};
-use angos_storage::Error as StorageError;
 
 use crate::registry::keys::DigestKeys;
 use crate::{
@@ -17,12 +16,12 @@ use crate::{
         Error,
         action::Action,
         categorize::{KeyCategory, categorize},
-        executor::ActionSink,
+        executor::{ActionSink, object_younger_than_grace},
         walk,
     },
     registry::{
         Error as RegistryError,
-        blob_store::{BlobStore, MultipartCleanup, UploadSummary},
+        blob_store::{BlobStore, UploadSummary},
         keys::REF_ROOT,
         metadata_store::MetadataStore,
     },
@@ -109,14 +108,11 @@ async fn sweep_one_upload(
 /// session marker is gone (a crash between opening the multipart and writing
 /// the marker leaves exactly this).
 pub async fn sweep_orphan_multiparts(
-    cleanup: &(dyn MultipartCleanup + Send + Sync),
+    blob_store: &BlobStore,
     window: Duration,
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
-    let orphans = cleanup
-        .list_orphan_multipart_uploads(window)
-        .await
-        .map_err(Error::from)?;
+    let orphans = blob_store.list_orphan_multipart_uploads(window).await?;
     let count = orphans.len();
     for orphan in orphans {
         sink.apply(Action::AbortMultipartUpload { upload: orphan })
@@ -141,8 +137,7 @@ pub async fn sweep_byteless_refs(
     let ctx = RefSweep {
         blob_store,
         metadata_store,
-        window,
-        now: Utc::now(),
+        window_secs: u64::try_from(window.num_seconds()).unwrap_or(0),
         sink,
     };
     let ctx = &ctx;
@@ -163,8 +158,7 @@ pub async fn sweep_byteless_refs(
 struct RefSweep<'a> {
     blob_store: &'a Arc<BlobStore>,
     metadata_store: &'a Arc<MetadataStore>,
-    window: Duration,
-    now: DateTime<Utc>,
+    window_secs: u64,
     sink: &'a dyn ActionSink,
 }
 
@@ -182,17 +176,14 @@ async fn sweep_one_ref(
     let Ok(namespace) = Namespace::new(namespace_raw) else {
         return Ok(());
     };
-    let meta = match ctx.metadata_store.object_store().head(key).await {
-        Ok(meta) => meta,
-        Err(StorageError::NotFound) => return Ok(()),
-        Err(e) => return Err(RegistryError::from(e).into()),
-    };
-    let Some(last_modified) = meta.last_modified else {
-        // No timestamp to gate on, so keep rather than race an upload that
-        // granted before its bytes landed.
-        return Ok(());
-    };
-    if ctx.now.signed_duration_since(last_modified) < ctx.window {
+    // A key with no timestamp is kept rather than raced against an upload that
+    // granted before its bytes landed; a gone key is already revoked.
+    let store = ctx.metadata_store.object_store().as_ref();
+    if object_younger_than_grace(store, key, ctx.window_secs)
+        .await
+        .map_err(RegistryError::from)?
+        .unwrap_or(true)
+    {
         return Ok(());
     }
 
@@ -204,8 +195,13 @@ async fn sweep_one_ref(
     for link in links {
         // The walked key's age gate does not cover its siblings: a fresh
         // `_own` granted before its bytes land is normal, so each entry is
-        // gated on its own reference key.
-        if entry_is_young(ctx, &blob.blob_ref_path(&namespace, &link)).await? {
+        // gated on its own reference key, a gone one reading as old.
+        let entry_key = blob.blob_ref_path(&namespace, &link);
+        if object_younger_than_grace(store, &entry_key, ctx.window_secs)
+            .await
+            .map_err(RegistryError::from)?
+            .unwrap_or(false)
+        {
             continue;
         }
         ctx.sink
@@ -217,19 +213,6 @@ async fn sweep_one_ref(
             .await?;
     }
     Ok(())
-}
-
-/// Whether an entry's reference key is younger than the sweep window. A
-/// missing timestamp reads as young, an absent key as old.
-async fn entry_is_young(ctx: &RefSweep<'_>, ref_key: &str) -> Result<bool, Error> {
-    let meta = match ctx.metadata_store.object_store().head(ref_key).await {
-        Ok(meta) => meta,
-        Err(StorageError::NotFound) => return Ok(false),
-        Err(e) => return Err(RegistryError::from(e).into()),
-    };
-    Ok(meta
-        .last_modified
-        .is_none_or(|modified| ctx.now.signed_duration_since(modified) < ctx.window))
 }
 
 #[cfg(test)]
@@ -301,10 +284,8 @@ mod tests {
     }
 
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
 
-    use async_trait::async_trait;
     use bytes::Bytes;
     use tokio::time::sleep;
 
@@ -313,7 +294,6 @@ mod tests {
     use crate::{
         command::maintenance::executor::Executor,
         registry::{
-            blob_store::OrphanMultipartUpload,
             metadata_store::{BlobIndexOperation, LinkKind},
             test_utils::for_each_backend,
         },
@@ -443,76 +423,6 @@ mod tests {
         .await;
     }
 
-    struct SpyCleanup {
-        list_called_timeout_secs: AtomicI64,
-        abort_call_count: AtomicUsize,
-        orphans: Vec<String>,
-    }
-
-    impl SpyCleanup {
-        fn new(orphan_keys: Vec<&str>) -> Self {
-            Self {
-                list_called_timeout_secs: AtomicI64::new(-1),
-                abort_call_count: AtomicUsize::new(0),
-                orphans: orphan_keys.into_iter().map(str::to_owned).collect(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl MultipartCleanup for SpyCleanup {
-        async fn list_orphan_multipart_uploads(
-            &self,
-            timeout: Duration,
-        ) -> Result<Vec<OrphanMultipartUpload>, RegistryError> {
-            self.list_called_timeout_secs
-                .store(timeout.num_seconds(), Ordering::SeqCst);
-            Ok(self
-                .orphans
-                .iter()
-                .map(|k| OrphanMultipartUpload {
-                    key: k.clone(),
-                    upload_id: "spy-upload-id".to_string(),
-                })
-                .collect())
-        }
-
-        async fn abort_orphan_multipart_upload(
-            &self,
-            _upload: &OrphanMultipartUpload,
-        ) -> Result<(), RegistryError> {
-            self.abort_call_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn multipart_sweep_forwards_timeout_and_captures_orphans() {
-        let spy = SpyCleanup::new(vec!["ns/_uploads/uuid1/data", "ns/_uploads/uuid2/data"]);
-        let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
-
-        sweep_orphan_multiparts(&spy, Duration::hours(2), &sink)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            spy.list_called_timeout_secs.load(Ordering::SeqCst),
-            7200,
-            "timeout forwarded as 2 h = 7200 s"
-        );
-        assert_eq!(
-            spy.abort_call_count.load(Ordering::SeqCst),
-            0,
-            "a capture sink must not invoke abort"
-        );
-        let sink = sink.into_inner().unwrap();
-        assert_eq!(sink.len(), 2, "two orphans produce two actions");
-        assert!(
-            sink.iter()
-                .all(|a| matches!(a, Action::AbortMultipartUpload { .. }))
-        );
-    }
-
     /// An `_own` grant landed after the sweep's cutoff must survive the purge
     /// its old sibling entry triggers.
     #[tokio::test]
@@ -532,13 +442,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // A cutoff between the two puts: the layer entry reads old, the
-            // later `_own` grant young. The sleeps keep both clear of the
-            // cutoff on second-granularity store timestamps.
-            sleep(StdDuration::from_millis(1500)).await;
-            let window = Duration::hours(1);
-            let now = Utc::now() + window;
-            sleep(StdDuration::from_millis(1500)).await;
+            // A two-second window puts the cutoff between the two puts: the
+            // layer entry reads old, the later `_own` grant young. The sleeps
+            // keep both clear of it on second-granularity store timestamps.
+            sleep(StdDuration::from_millis(3000)).await;
             metadata_store
                 .update_blob_index(
                     &namespace,
@@ -552,8 +459,7 @@ mod tests {
             let ctx = RefSweep {
                 blob_store: &blob_store,
                 metadata_store: &metadata_store,
-                window,
-                now,
+                window_secs: 2,
                 sink: &sink,
             };
             let walked = ghost.blob_ref_path(&namespace, &stale);

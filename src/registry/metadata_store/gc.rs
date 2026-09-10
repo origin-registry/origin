@@ -3,15 +3,18 @@
 //!
 //! A collector about to delete blob data publishes a [`GcRun`] naming its
 //! digest range, re-reads that marker before the irreversible delete, and
-//! removes it afterwards; a writer that has just written reference keys lists
+//! expires it afterwards; a writer that has just written reference keys lists
 //! `v2/gc/` once and backs off on an unexpired run covering one of its
 //! digests. Either the writer's reference completed before the collector's
 //! liveness listing (the key is younger than the grace period, so the blob
-//! reads live), or it completed after, in which case the marker was already
+//! reads live), or it completed after, in which case the marker was still
 //! visible to the writer's check.
 //!
-//! The marker's expiry only stops a crashed collector from wedging writers; a
-//! live collector fences itself by refreshing before each delete.
+//! That last part is why a finished run expires its marker instead of removing
+//! it: a writer whose reference landed after the run's last liveness listing
+//! would otherwise find nothing and commit onto reclaimed bytes. The expiry
+//! also stops a crashed collector from wedging writers, since a live one
+//! fences itself by refreshing before each delete.
 
 use std::time::Duration as StdDuration;
 
@@ -27,6 +30,17 @@ use angos_oci::Digest;
 use angos_storage::Error as StorageError;
 
 use crate::registry::{Error, keys::GC_ROOT, metadata_store::MetadataStore};
+
+/// How long a released marker lingers before it expires. Removing it outright
+/// would let a writer whose reference key landed after the run's last liveness
+/// listing pass its own check and commit onto reclaimed bytes, and a finished
+/// run leaves nothing else to find; the linger has to outlast the gap between
+/// a writer's reference wave and its collector check, which is one listing
+/// plus the backoff budget below. Writers reap what they read expired.
+#[cfg(not(test))]
+pub const RELEASE_LINGER_MS: i64 = 5_000;
+#[cfg(test)]
+pub const RELEASE_LINGER_MS: i64 = 100;
 
 /// Attempts and jittered backoff for a writer waiting out a collector run; a
 /// run only covers one batch, so the wait is short.
@@ -94,6 +108,9 @@ impl MetadataStore {
                     return Ok(true);
                 };
                 if run.expires_at < Utc::now() {
+                    // A released marker lingers by design and scrub leaves it
+                    // alone, so the writer that reads it expired reaps it.
+                    let _ = self.object_store().delete(&key).await;
                     continue;
                 }
                 if digests
@@ -152,20 +169,19 @@ impl MetadataStore {
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(e.into()),
         }
-        self.put_gc_run(claim).await?;
+        let body = self.gc_run_body(claim)?;
+        self.object_store().put(&claim.key, body).await?;
         Ok(true)
     }
 
-    /// Remove the claim once the range is done.
+    /// Expire the claim once the range is done, rather than removing it: a
+    /// writer whose reference key landed after this run's last liveness
+    /// listing must still find the marker and back off.
     pub async fn gc_release(&self, claim: GcClaim) -> Result<(), Error> {
-        self.object_store()
-            .delete(&claim.key)
-            .await
-            .map_err(Error::from)
-    }
-
-    async fn put_gc_run(&self, claim: &GcClaim) -> Result<(), Error> {
-        let body = self.gc_run_body(claim)?;
+        let body = encode_run(
+            &claim,
+            Utc::now() + Duration::milliseconds(RELEASE_LINGER_MS),
+        )?;
         self.object_store()
             .put(&claim.key, body)
             .await
@@ -182,12 +198,16 @@ impl MetadataStore {
             .unwrap_or(i64::MAX)
             .saturating_mul(2)
             .clamp(60, 86_400);
-        let run = GcRun {
-            start: claim.start.clone(),
-            end: claim.end.clone(),
-            expires_at: Utc::now() + Duration::seconds(ttl),
-            instance: claim.instance.clone(),
-        };
-        Ok(Bytes::from(serde_json::to_vec(&run)?))
+        encode_run(claim, Utc::now() + Duration::seconds(ttl))
     }
+}
+
+fn encode_run(claim: &GcClaim, expires_at: DateTime<Utc>) -> Result<Bytes, Error> {
+    let run = GcRun {
+        start: claim.start.clone(),
+        end: claim.end.clone(),
+        expires_at,
+        instance: claim.instance.clone(),
+    };
+    Ok(Bytes::from(serde_json::to_vec(&run)?))
 }

@@ -1,11 +1,3 @@
-use std::{
-    borrow::Borrow,
-    fmt::{Display, Formatter},
-    ops::Deref,
-    str::FromStr,
-};
-
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::Error;
@@ -39,83 +31,12 @@ impl UploadSessionId {
     }
 }
 
-impl FromStr for UploadSessionId {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::new(s)
-    }
-}
-
-impl TryFrom<String> for UploadSessionId {
-    type Error = Error;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::new(&s)
-    }
-}
-
-impl TryFrom<&str> for UploadSessionId {
-    type Error = Error;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl Display for UploadSessionId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for UploadSessionId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Deref for UploadSessionId {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Borrow<str> for UploadSessionId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl PartialEq<str> for UploadSessionId {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl Serialize for UploadSessionId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for UploadSessionId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::try_from(s).map_err(serde::de::Error::custom)
-    }
-}
+str_newtype!(UploadSessionId);
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use crate::types::upload_session_id::*;
 
     const SAMPLE: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";

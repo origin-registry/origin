@@ -1,8 +1,11 @@
 use std::env;
+use std::future::Future;
+use std::time::Duration;
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::Value;
+use tokio::time::sleep;
 
 use crate::error::{GateResult, ensure};
 use crate::store::sha256_hex;
@@ -15,6 +18,27 @@ application/vnd.docker.distribution.manifest.v2+json,\
 application/vnd.docker.distribution.manifest.list.v2+json";
 const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const CATALOG_PAGE: u16 = 1000;
+
+/// A `503` asks for a retry: a reclamation marker lingers a few seconds past
+/// a scrub's delete, and a push landing inside that window backs off.
+const RETRY_503_ATTEMPTS: u32 = 8;
+const RETRY_503_PAUSE: Duration = Duration::from_secs(1);
+
+/// Send with `send`, repeating a `503` answer up to [`RETRY_503_ATTEMPTS`].
+async fn retry_503<Fut>(send: impl Fn() -> Fut) -> GateResult<Response>
+where
+    Fut: Future<Output = GateResult<Response>>,
+{
+    let mut response = send().await?;
+    for _ in 1..RETRY_503_ATTEMPTS {
+        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+            break;
+        }
+        sleep(RETRY_503_PAUSE).await;
+        response = send().await?;
+    }
+    Ok(response)
+}
 
 /// An image pushed through the registry API; digests are hex without the
 /// `sha256:` prefix, the form the seeded store keys use.
@@ -53,20 +77,25 @@ impl RegistryClient {
     /// Upload `content` as a blob via a monolithic POST + PUT, returning its
     /// hex digest.
     pub async fn upload_blob(&self, namespace: &str, content: &[u8]) -> GateResult<String> {
-        let location = self.upload_location(namespace).await?;
         let digest = sha256_hex(content);
-        let separator = if location.contains('?') { '&' } else { '?' };
-        let url = format!(
-            "{}{location}{separator}digest=sha256:{digest}",
-            self.base_for(&location)
-        );
-        let response = self
-            .http
-            .put(url)
-            .header(CONTENT_TYPE, "application/octet-stream")
-            .body(content.to_vec())
-            .send()
-            .await?;
+        let digest_ref = &digest;
+        // A refused PUT consumes its session, so each attempt opens a new one.
+        let response = retry_503(|| async move {
+            let location = self.upload_location(namespace).await?;
+            let separator = if location.contains('?') { '&' } else { '?' };
+            let url = format!(
+                "{}{location}{separator}digest=sha256:{digest_ref}",
+                self.base_for(&location)
+            );
+            Ok(self
+                .http
+                .put(url)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(content.to_vec())
+                .send()
+                .await?)
+        })
+        .await?;
         ensure(response.status().is_success(), || {
             format!("blob upload to {namespace} returned {}", response.status())
         })?;
@@ -89,13 +118,18 @@ impl RegistryClient {
             config.len(),
             layer.len()
         );
-        let response = self
-            .http
-            .put(format!("{}/v2/{namespace}/manifests/{tag}", self.base))
-            .header(CONTENT_TYPE, OCI_MANIFEST)
-            .body(manifest.clone())
-            .send()
-            .await?;
+        let url = format!("{}/v2/{namespace}/manifests/{tag}", self.base);
+        let (url, manifest_ref) = (&url, &manifest);
+        let response = retry_503(|| async move {
+            Ok(self
+                .http
+                .put(url.as_str())
+                .header(CONTENT_TYPE, OCI_MANIFEST)
+                .body(manifest_ref.clone())
+                .send()
+                .await?)
+        })
+        .await?;
         ensure(response.status().is_success(), || {
             format!(
                 "manifest push {namespace}:{tag} returned {}",

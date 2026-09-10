@@ -37,8 +37,8 @@ impl ReplicationMode {
     }
 }
 
-/// Runtime representation of one replication downstream. Holds only resolved
-/// fields and is constructed exclusively via [`ReplicationDownstream::builder`].
+/// Runtime representation of one replication downstream, holding only
+/// resolved fields.
 #[derive(Debug)]
 pub struct ReplicationDownstream {
     pub name: String,
@@ -58,21 +58,20 @@ pub struct ReplicationDownstream {
 }
 
 impl ReplicationDownstream {
-    /// Starts building a downstream from individual resolved fields. The local
-    /// `name`, the pre-built `registry_client` for the downstream registry and
-    /// `max_concurrent_pushes` are required; `mode`, `namespace_filter` and
-    /// `prune` are optional fluent setters on the returned builder.
+    /// A test downstream with the defaults: event+reconcile mode, a match-all
+    /// filter, no prune and a verbatim namespace mapping.
+    #[cfg(test)]
     #[must_use]
-    pub fn builder(
+    pub fn new(
         name: String,
         registry_client: Arc<RegistryClient>,
         max_concurrent_pushes: usize,
-    ) -> ReplicationDownstreamBuilder {
-        ReplicationDownstreamBuilder {
+    ) -> Self {
+        Self {
             name,
             registry_client,
-            mode: None,
-            namespace_filter: None,
+            mode: ReplicationMode::default(),
+            namespace_filter: Vec::new(),
             max_concurrent_pushes,
             prune: false,
             local_namespace: None,
@@ -109,72 +108,6 @@ impl ReplicationDownstream {
     }
 }
 
-/// Builder for [`ReplicationDownstream`]. `name`, `registry_client` and
-/// `max_concurrent_pushes` are required and supplied to
-/// [`ReplicationDownstream::builder`]; the rest default.
-pub struct ReplicationDownstreamBuilder {
-    name: String,
-    registry_client: Arc<RegistryClient>,
-    mode: Option<ReplicationMode>,
-    namespace_filter: Option<Vec<Regex>>,
-    max_concurrent_pushes: usize,
-    prune: bool,
-    local_namespace: Option<Namespace>,
-    target_namespace: Option<Namespace>,
-}
-
-impl ReplicationDownstreamBuilder {
-    /// Replication mode (defaults to [`ReplicationMode::EventReconcile`]).
-    #[must_use]
-    pub fn mode(mut self, mode: ReplicationMode) -> Self {
-        self.mode = Some(mode);
-        self
-    }
-
-    /// Compiled namespace filter (defaults to empty = match-all).
-    #[must_use]
-    pub fn namespace_filter(mut self, namespace_filter: Vec<Regex>) -> Self {
-        self.namespace_filter = Some(namespace_filter);
-        self
-    }
-
-    /// Whether reconciliation may delete downstream-only tags (defaults to
-    /// `false`; only enable for a one-way mirror).
-    #[must_use]
-    pub fn prune(mut self, prune: bool) -> Self {
-        self.prune = prune;
-        self
-    }
-
-    /// Namespace mapping to the downstream: the local namespace to strip and the
-    /// target namespace to prepend (defaults to verbatim).
-    #[must_use]
-    pub fn namespace_mapping(
-        mut self,
-        local_namespace: Option<Namespace>,
-        target_namespace: Option<Namespace>,
-    ) -> Self {
-        self.local_namespace = local_namespace;
-        self.target_namespace = target_namespace;
-        self
-    }
-
-    /// Builds the [`ReplicationDownstream`].
-    #[must_use]
-    pub fn build(self) -> ReplicationDownstream {
-        ReplicationDownstream {
-            name: self.name,
-            registry_client: self.registry_client,
-            mode: self.mode.unwrap_or_default(),
-            namespace_filter: self.namespace_filter.unwrap_or_default(),
-            max_concurrent_pushes: self.max_concurrent_pushes,
-            prune: self.prune,
-            local_namespace: self.local_namespace,
-            target_namespace: self.target_namespace,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -190,14 +123,13 @@ mod tests {
 
     fn test_client() -> Arc<RegistryClient> {
         let cache = cache::Config::Memory.to_backend().unwrap();
-        let client = RegistryClient::builder(
+        Arc::new(RegistryClient::new(
             "https://example.test".to_string(),
             reqwest::Client::new(),
+            None,
             cache,
-        )
-        .max_manifest_size_bytes(DEFAULT_MAX_MANIFEST_SIZE_BYTES)
-        .build();
-        Arc::new(client)
+            DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+        ))
     }
 
     #[test]
@@ -211,9 +143,8 @@ mod tests {
     }
 
     #[test]
-    fn builder_applies_defaults() {
-        let downstream =
-            ReplicationDownstream::builder("eu-region".to_string(), test_client(), 4).build();
+    fn new_applies_defaults() {
+        let downstream = ReplicationDownstream::new("eu-region".to_string(), test_client(), 4);
 
         assert_eq!(downstream.name, "eu-region");
         assert_eq!(downstream.mode, ReplicationMode::EventReconcile);
@@ -223,15 +154,16 @@ mod tests {
 
     #[test]
     fn matches_namespace_empty_filter_matches_all() {
-        let downstream = ReplicationDownstream::builder("d".to_string(), test_client(), 1).build();
+        let downstream = ReplicationDownstream::new("d".to_string(), test_client(), 1);
         assert!(downstream.matches_namespace("anything/at-all"));
     }
 
     #[test]
     fn matches_namespace_honours_filter() {
-        let downstream = ReplicationDownstream::builder("d".to_string(), test_client(), 1)
-            .namespace_filter(vec![Regex::new("^nginx/.*").unwrap()])
-            .build();
+        let downstream = ReplicationDownstream {
+            namespace_filter: vec![Regex::new("^nginx/.*").unwrap()],
+            ..ReplicationDownstream::new("d".to_string(), test_client(), 1)
+        };
         assert!(downstream.matches_namespace("nginx/foo"));
         assert!(!downstream.matches_namespace("redis/bar"));
     }

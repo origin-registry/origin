@@ -16,7 +16,7 @@ use crate::{
     },
     jobs::{
         JobState, Queue,
-        store::{DeadLetterRead, JobEnvelope, LockKeyIndex, job_pending_path},
+        store::{DeadLetterRecord, JobEnvelope, LockKeyIndex, job_pending_path},
     },
     registry::Error as RegistryError,
 };
@@ -34,7 +34,7 @@ impl Validator {
         };
         let parses = match state {
             JobState::Pending => serde_json::from_slice::<JobEnvelope>(&raw).is_ok(),
-            JobState::Failed => serde_json::from_slice::<DeadLetterRead>(&raw).is_ok(),
+            JobState::Failed => serde_json::from_slice::<DeadLetterRecord>(&raw).is_ok(),
         };
         if !parses {
             warn!("scrub: job record '{key}' does not parse; deleting");
@@ -57,10 +57,14 @@ impl Validator {
         };
 
         let pending = job_pending_path(queue.as_str(), &index.storage_key);
-        match self.metadata_store.object_store().head(&pending).await {
-            Ok(_) => return Ok(()),
-            Err(StorageError::NotFound) => {}
-            Err(e) => return Err(RegistryError::from(e).into()),
+        if self
+            .metadata_store
+            .object_store()
+            .exists(&pending)
+            .await
+            .map_err(RegistryError::from)?
+        {
+            return Ok(());
         }
         if self.younger_than_grace(key).await? {
             return Ok(());

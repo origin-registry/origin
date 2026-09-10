@@ -40,11 +40,7 @@ use crate::{
         repository_resolver::RepositoryResolver,
     },
 };
-pub use admin::{
-    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
-    ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
-};
-use blob_ownership::BlobOwnership;
+pub use admin::{DeleteJobRequest, ListJobsRequest, ListPullsRequest, RetryJobRequest};
 pub use error::Error;
 pub use repository::Repository;
 
@@ -173,9 +169,10 @@ impl Registry {
             .any(|pattern| pattern.is_match(tag.as_ref()))
     }
 
-    /// Ownership view over the metadata store's blob index.
-    pub fn blob_ownership(&self) -> BlobOwnership<'_> {
-        BlobOwnership::new(self.metadata_store.as_ref())
+    /// The metadata store, for the ownership and link reads outside the
+    /// registry's own operations.
+    pub fn metadata_store(&self) -> &MetadataStore {
+        &self.metadata_store
     }
 
     #[instrument(skip(blob_store, metadata_store, resolver, config))]
@@ -222,18 +219,15 @@ impl Registry {
         let Some(dispatcher) = &self.event_dispatcher else {
             return Ok(());
         };
-        let mut first_error: Option<Error> = None;
+        let mut outcome = Ok(());
         for event in events {
-            if let Err(error) = dispatcher.dispatch(event).await
-                && first_error.is_none()
-            {
-                first_error = Some(Error::EventDelivery(error.to_string()));
-            }
+            let delivered = dispatcher
+                .dispatch(event)
+                .await
+                .map_err(|error| Error::EventDelivery(error.to_string()));
+            outcome = outcome.and(delivered);
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        outcome
     }
 
     /// Drains in-flight async webhook deliveries to completion.

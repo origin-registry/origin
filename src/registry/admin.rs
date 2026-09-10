@@ -1,7 +1,7 @@
 //! The `/v2/_angos` admin surface: repository and namespace info for the web UI,
 //! plus the durable job list/retry/delete endpoints.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -13,8 +13,7 @@ use tracing::{instrument, warn};
 use angos_oci::request::GetReferrersRequest;
 use angos_oci::{
     Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-    MediaType, Namespace, Platform as OciPlatform, Reference, Tag, UploadSessionId,
-    namespace_belongs_to,
+    MediaType, Namespace, Platform, Reference, Tag, UploadSessionId, namespace_belongs_to,
 };
 
 use crate::{
@@ -29,21 +28,6 @@ use crate::{
         metadata_store::{AccessEntry, LinkKind},
     },
 };
-
-#[derive(Debug)]
-pub struct ListNamespacesRequest {
-    pub repository: Namespace,
-}
-
-#[derive(Debug)]
-pub struct ListRevisionsRequest {
-    pub namespace: Namespace,
-}
-
-#[derive(Debug)]
-pub struct ListUploadsRequest {
-    pub namespace: Namespace,
-}
 
 #[derive(Debug)]
 pub struct ListPullsRequest {
@@ -116,30 +100,12 @@ pub struct NamespacesBody {
     immutable_tags_exclusions: Vec<RegexPattern>,
 }
 
-#[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct ExtPlatform {
-    os: String,
-    architecture: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    variant: Option<String>,
-}
-
-impl From<OciPlatform> for ExtPlatform {
-    fn from(p: OciPlatform) -> Self {
-        ExtPlatform {
-            os: p.os,
-            architecture: p.architecture,
-            variant: p.variant,
-        }
-    }
-}
-
 #[derive(Serialize, Debug, Clone)]
 pub struct ParentRef {
     digest: String,
     tags: Vec<Tag>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    platform: Option<ExtPlatform>,
+    platform: Option<Platform>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -295,7 +261,7 @@ fn extract_in_toto_predicate(child_manifest: &Manifest) -> Option<String> {
 
 struct ManifestAnalysis {
     /// Index children that are not referrers, each paired with its platform.
-    parent_links: Vec<(Digest, Option<ExtPlatform>)>,
+    parent_links: Vec<(Digest, Option<Platform>)>,
     referrer_candidates: Vec<DockerReferrerCandidate>,
 }
 
@@ -309,10 +275,7 @@ fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
             if let Some(referrer) = extract_docker_referrer(child) {
                 referrer_candidates.push(referrer);
             } else {
-                parent_links.push((
-                    child.digest.clone(),
-                    child.platform.clone().map(ExtPlatform::from),
-                ));
+                parent_links.push((child.digest.clone(), child.platform.clone()));
             }
         }
     }
@@ -322,19 +285,39 @@ fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
     }
 }
 
-/// Groups `(tag, digest)` pairs by digest, collecting tags in encounter order.
-fn build_digest_to_tags_map_from_pairs(tag_links: Vec<(Tag, Digest)>) -> HashMap<Digest, Vec<Tag>> {
-    let mut map: HashMap<Digest, Vec<Tag>> = HashMap::new();
-    for (tag, digest) in tag_links {
-        map.entry(digest).or_default().push(tag);
-    }
-    map
+/// Reads one job record per storage key, keeping the keyset (time) order; a
+/// record gone or unreadable mid-scan is skipped rather than failing the page.
+async fn read_job_page<T, Fut>(
+    storage_keys: Vec<String>,
+    read: impl Fn(String) -> Fut,
+) -> Result<Vec<T>, Error>
+where
+    Fut: Future<Output = Result<T, job_store::Error>>,
+{
+    let read = &read;
+    stream::iter(storage_keys)
+        .map(|storage_key| async move {
+            match read(storage_key.clone()).await {
+                Ok(entry) => Ok(Some(entry)),
+                Err(job_store::Error::NotFound) => Ok(None),
+                // Failing the page here would hide every other job on it.
+                Err(job_store::Error::Corrupt(e)) => {
+                    warn!("admin: skipping unreadable job record '{storage_key}': {e}");
+                    Ok(None)
+                }
+                Err(e) => Err(Error::from(e)),
+            }
+        })
+        .buffered(ADMIN_READ_CONCURRENCY)
+        .try_filter_map(|entry| async move { Ok(entry) })
+        .try_collect()
+        .await
 }
 
 /// The `ParentRef` list for `digest`, empty when it has no recorded parents.
 fn parent_refs_for(
     digest: &Digest,
-    child_to_parents: &HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
+    child_to_parents: &HashMap<Digest, Vec<(Digest, Option<Platform>)>>,
     digest_to_tags: &HashMap<Digest, Vec<Tag>>,
 ) -> Vec<ParentRef> {
     child_to_parents
@@ -385,9 +368,9 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn get_namespaces_info(
         &self,
-        request: ListNamespacesRequest,
+        repository: &Namespace,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = request.repository.as_ref();
+        let repository = repository.as_ref();
         let namespace_names = self.list_repository_namespaces(repository).await?;
 
         // A directory whose name is not a valid namespace is a storage artifact
@@ -436,9 +419,8 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn get_revisions_info(
         &self,
-        request: ListRevisionsRequest,
+        namespace: &Namespace,
     ) -> Result<Response<ResponseBody>, Error> {
-        let namespace = &request.namespace;
         // Materialized once: every step below needs the full revision set.
         let all_revisions: Vec<Digest> = self
             .metadata_store
@@ -516,9 +498,8 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn get_uploads_info(
         &self,
-        request: ListUploadsRequest,
+        namespace: &Namespace,
     ) -> Result<Response<ResponseBody>, Error> {
-        let namespace = &request.namespace;
         let mut session_ids: Vec<UploadSessionId> = self
             .blob_store
             .stream_uploads(namespace)
@@ -570,37 +551,22 @@ impl Registry {
             .list_pending_page(queue, n, after.as_deref())
             .await?;
 
-        // Envelope reads fan out; `buffered` keeps the keyset (time) order.
-        let jobs: Vec<JobEntry> = stream::iter(page.items)
-            .map(|storage_key| async move {
-                match self.job_queue.read_pending(queue, &storage_key).await {
-                    Ok(envelope) => {
-                        let not_before = job_store::parse_not_before(&storage_key)
-                            .unwrap_or(envelope.created_at);
-                        Ok(Some(JobEntry {
-                            storage_key,
-                            id: envelope.id,
-                            kind: envelope.kind,
-                            lock_key: envelope.lock_key.to_string(),
-                            attempts: envelope.attempts,
-                            max_attempts: envelope.max_attempts.unwrap_or_default(),
-                            created_at: envelope.created_at,
-                            not_before,
-                        }))
-                    }
-                    Err(job_store::Error::NotFound) => Ok(None),
-                    // Failing the page here would hide every other job on it.
-                    Err(job_store::Error::Corrupt(e)) => {
-                        warn!("admin: skipping unreadable job record '{storage_key}': {e}");
-                        Ok(None)
-                    }
-                    Err(e) => Err(Error::from(e)),
-                }
+        let jobs = read_job_page(page.items, |storage_key| async move {
+            let envelope = self.job_queue.read_pending(queue, &storage_key).await?;
+            let not_before =
+                job_store::parse_not_before(&storage_key).unwrap_or(envelope.created_at);
+            Ok(JobEntry {
+                storage_key,
+                id: envelope.id,
+                kind: envelope.kind,
+                lock_key: envelope.lock_key.to_string(),
+                attempts: envelope.attempts,
+                max_attempts: envelope.max_attempts.unwrap_or_default(),
+                created_at: envelope.created_at,
+                not_before,
             })
-            .buffered(ADMIN_READ_CONCURRENCY)
-            .try_filter_map(|entry| async move { Ok(entry) })
-            .try_collect()
-            .await?;
+        })
+        .await?;
 
         json_response(
             StatusCode::OK,
@@ -625,34 +591,21 @@ impl Registry {
             .list_failed_page(queue, n, after.as_deref())
             .await?;
 
-        // Record reads fan out; `buffered` keeps the keyset (time) order.
-        let failed: Vec<FailedJobEntry> = stream::iter(page.items)
-            .map(|storage_key| async move {
-                match self.job_queue.read_failed(queue, &storage_key).await {
-                    Ok(record) => Ok(Some(FailedJobEntry {
-                        storage_key,
-                        id: record.envelope.id,
-                        kind: record.envelope.kind,
-                        lock_key: record.envelope.lock_key.to_string(),
-                        attempts: record.envelope.attempts,
-                        max_attempts: record.envelope.max_attempts.unwrap_or_default(),
-                        created_at: record.envelope.created_at,
-                        failed_at: record.failed_at,
-                        last_error: record.last_error,
-                    })),
-                    Err(job_store::Error::NotFound) => Ok(None),
-                    // Failing the page here would hide every other job on it.
-                    Err(job_store::Error::Corrupt(e)) => {
-                        warn!("admin: skipping unreadable job record '{storage_key}': {e}");
-                        Ok(None)
-                    }
-                    Err(e) => Err(Error::from(e)),
-                }
+        let failed = read_job_page(page.items, |storage_key| async move {
+            let record = self.job_queue.read_failed(queue, &storage_key).await?;
+            Ok(FailedJobEntry {
+                storage_key,
+                id: record.envelope.id,
+                kind: record.envelope.kind,
+                lock_key: record.envelope.lock_key.to_string(),
+                attempts: record.envelope.attempts,
+                max_attempts: record.envelope.max_attempts.unwrap_or_default(),
+                created_at: record.envelope.created_at,
+                failed_at: record.failed_at,
+                last_error: record.last_error,
             })
-            .buffered(ADMIN_READ_CONCURRENCY)
-            .try_filter_map(|entry| async move { Ok(entry) })
-            .try_collect()
-            .await?;
+        })
+        .await?;
 
         json_response(
             StatusCode::OK,
@@ -733,7 +686,7 @@ impl Registry {
         &self,
         all_revisions: &[Digest],
     ) -> (
-        HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
+        HashMap<Digest, Vec<(Digest, Option<Platform>)>>,
         HashMap<Digest, Vec<ReferrerInfo>>,
     ) {
         // `buffered` keeps the revision order so the merged map values stay
@@ -760,8 +713,7 @@ impl Registry {
             .collect()
             .await;
 
-        let mut child_to_parents: HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>> =
-            HashMap::new();
+        let mut child_to_parents: HashMap<Digest, Vec<(Digest, Option<Platform>)>> = HashMap::new();
         let mut docker_referrers: HashMap<Digest, Vec<ReferrerInfo>> = HashMap::new();
         for (digest, parent_links, referrers) in analyses.into_iter().flatten() {
             for (child_digest, platform) in parent_links {
@@ -799,7 +751,7 @@ impl Registry {
         namespace: &Namespace,
         all_revisions: Vec<Digest>,
         digest_to_tags: &HashMap<Digest, Vec<Tag>>,
-        child_to_parents: HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
+        child_to_parents: HashMap<Digest, Vec<(Digest, Option<Platform>)>>,
         mut docker_referrers: HashMap<Digest, Vec<ReferrerInfo>>,
     ) -> Vec<ManifestEntry> {
         // Read once for the whole listing, not once per manifest carrying the
@@ -938,7 +890,12 @@ impl Registry {
             .collect()
             .await;
 
-        Ok(build_digest_to_tags_map_from_pairs(tag_links))
+        Ok(tag_links
+            .into_iter()
+            .fold(HashMap::new(), |mut map, (tag, digest)| {
+                map.entry(digest).or_default().push(tag);
+                map
+            }))
     }
 
     async fn list_repository_namespaces(&self, repository: &str) -> Result<Vec<Namespace>, Error> {
@@ -992,18 +949,17 @@ mod tests {
 
     use angos_oci::{
         DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, Namespace,
-        Platform as OciPlatform, Reference, Tag, UploadSessionId,
+        Platform, Reference, Tag, UploadSessionId,
     };
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
     use crate::registry::admin::{
-        ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
-        extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
+        analyze_manifest, extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
     };
     use serde_json::Value;
 
-    use crate::registry::admin::{ListNamespacesRequest, ListPullsRequest, ListRevisionsRequest};
+    use crate::registry::admin::ListPullsRequest;
     use crate::registry::keys::NamespaceKeys;
     use crate::registry::metadata_store::{
         AccessEntry, MetadataStore,
@@ -1092,9 +1048,7 @@ mod tests {
         let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
 
         registry
-            .get_namespaces_info(ListNamespacesRequest {
-                repository: Namespace::new("test-repo").unwrap(),
-            })
+            .get_namespaces_info(&Namespace::new("test-repo").unwrap())
             .await
             .unwrap();
 
@@ -1225,7 +1179,7 @@ mod tests {
     #[test]
     fn analyze_manifest_returns_parent_links_for_non_referrer_children() {
         let child_digest = digest("1111");
-        let platform = OciPlatform {
+        let platform = Platform {
             architecture: "amd64".to_string(),
             os: "linux".to_string(),
             variant: None,
@@ -1296,45 +1250,8 @@ mod tests {
     }
 
     #[test]
-    fn build_digest_to_tags_map_empty_input_produces_empty_map() {
-        let result = build_digest_to_tags_map_from_pairs(vec![]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn build_digest_to_tags_map_multiple_tags_for_same_digest_are_grouped() {
-        let d = digest("2222");
-        let pairs = vec![
-            (Tag::new("v1.0").unwrap(), d.clone()),
-            (Tag::new("latest").unwrap(), d.clone()),
-        ];
-        let result = build_digest_to_tags_map_from_pairs(pairs);
-        assert_eq!(result.len(), 1);
-        let mut tags = result[&d].clone();
-        tags.sort_unstable();
-        assert_eq!(
-            tags,
-            vec![Tag::new("latest").unwrap(), Tag::new("v1.0").unwrap()]
-        );
-    }
-
-    #[test]
-    fn build_digest_to_tags_map_tags_for_different_digests_are_separate() {
-        let d1 = digest("aaaa");
-        let d2 = digest("bbbb");
-        let pairs = vec![
-            (Tag::new("alpha").unwrap(), d1.clone()),
-            (Tag::new("beta").unwrap(), d2.clone()),
-        ];
-        let result = build_digest_to_tags_map_from_pairs(pairs);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[&d1], vec![Tag::new("alpha").unwrap()]);
-        assert_eq!(result[&d2], vec![Tag::new("beta").unwrap()]);
-    }
-
-    #[test]
     fn parent_refs_for_returns_empty_when_digest_not_in_parent_map() {
-        let child_to_parents: HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>> = HashMap::new();
+        let child_to_parents: HashMap<Digest, Vec<(Digest, Option<Platform>)>> = HashMap::new();
         let digest_to_tags: HashMap<Digest, Vec<Tag>> = HashMap::new();
         let result = parent_refs_for(&digest("cccc"), &child_to_parents, &digest_to_tags);
         assert!(result.is_empty());
@@ -1371,10 +1288,11 @@ mod tests {
         let child = digest("1234");
         let parent_a = digest("aaaa");
         let parent_b = digest("bbbb");
-        let platform = ExtPlatform {
+        let platform = Platform {
             os: "linux".to_string(),
             architecture: "arm64".to_string(),
             variant: Some("v8".to_string()),
+            ..Platform::default()
         };
         let child_to_parents = HashMap::from([(
             child.clone(),
@@ -1427,9 +1345,7 @@ mod tests {
                 .unwrap();
 
             let response = registry
-                .get_namespaces_info(ListNamespacesRequest {
-                    repository: Namespace::new("test-repo").unwrap(),
-                })
+                .get_namespaces_info(&Namespace::new("test-repo").unwrap())
                 .await
                 .unwrap();
             let body = response_json(response).await;
@@ -1491,9 +1407,7 @@ mod tests {
                 .unwrap();
 
             let response = registry
-                .get_namespaces_info(ListNamespacesRequest {
-                    repository: Namespace::new("test-repo").unwrap(),
-                })
+                .get_namespaces_info(&Namespace::new("test-repo").unwrap())
                 .await
                 .unwrap();
             let body = response_json(response).await;
@@ -1528,9 +1442,7 @@ mod tests {
             .unwrap();
 
         let response = registry
-            .get_namespaces_info(ListNamespacesRequest {
-                repository: Namespace::new("test-repo").unwrap(),
-            })
+            .get_namespaces_info(&Namespace::new("test-repo").unwrap())
             .await
             .unwrap();
         let body = response_json(response).await;
@@ -1558,9 +1470,7 @@ mod tests {
             create_test_blob(registry, &other, b"hidden content").await;
 
             let response = registry
-                .get_namespaces_info(ListNamespacesRequest {
-                    repository: Namespace::new("test-repo").unwrap(),
-                })
+                .get_namespaces_info(&Namespace::new("test-repo").unwrap())
                 .await
                 .unwrap();
             let body = response_json(response).await;
@@ -1603,9 +1513,7 @@ mod tests {
             .unwrap();
 
         let response = registry
-            .get_namespaces_info(ListNamespacesRequest {
-                repository: Namespace::new("test-repo").unwrap(),
-            })
+            .get_namespaces_info(&Namespace::new("test-repo").unwrap())
             .await
             .expect("one invalid directory must not fail the listing");
         let body = response_json(response).await;
@@ -1713,9 +1621,7 @@ mod tests {
 
     async fn last_pulled_of(registry: &Registry, namespace: &Namespace, target: &Digest) -> Value {
         let response = registry
-            .get_revisions_info(ListRevisionsRequest {
-                namespace: namespace.clone(),
-            })
+            .get_revisions_info(&namespace.clone())
             .await
             .unwrap();
         let body = response_json(response).await;

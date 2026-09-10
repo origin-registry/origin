@@ -15,8 +15,7 @@ use crate::{
         Config, Jwk,
         validator::{
             Jwks, OpenIdConfiguration, fetch_jwks, fetch_oidc_configuration, issuer_bearer_token,
-            jwks_cache_key, oidc_configuration_cache_key, validate_oidc_token,
-            verify_jwt_with_header,
+            issuer_key, validate_oidc_token, verify_jwt_with_header,
         },
     },
     cache,
@@ -299,7 +298,7 @@ async fn test_fetch_oidc_configuration_issuer_mismatch() {
     }
 
     let cached = cache
-        .retrieve::<OpenIdConfiguration>(&oidc_configuration_cache_key(&provider))
+        .retrieve::<OpenIdConfiguration>(&issuer_key(&provider, "config"))
         .await
         .unwrap();
     assert!(cached.is_none());
@@ -465,7 +464,7 @@ async fn test_validate_oidc_token_refreshes_jwks_once_when_cached_kid_is_missing
         }],
     };
     cache
-        .store(&jwks_cache_key(&provider), &stale_jwks, 3600)
+        .store(&issuer_key(&provider, "jwks"), &stale_jwks, 3600)
         .await
         .unwrap();
 
@@ -480,7 +479,7 @@ async fn test_validate_oidc_token_refreshes_jwks_once_when_cached_kid_is_missing
         "expected rotated key to validate, got {result:?}"
     );
     let cached_jwks = cache
-        .retrieve::<Jwks>(&jwks_cache_key(&provider))
+        .retrieve::<Jwks>(&issuer_key(&provider, "jwks"))
         .await
         .unwrap()
         .unwrap();
@@ -515,7 +514,7 @@ async fn unknown_kids_cost_one_jwks_fetch_per_cooldown_not_one_per_request() {
         }],
     };
     cache
-        .store(&jwks_cache_key(&provider), &stale_jwks, 3600)
+        .store(&issuer_key(&provider, "jwks"), &stale_jwks, 3600)
         .await
         .unwrap();
 
@@ -558,7 +557,7 @@ async fn test_validate_oidc_token_returns_unauthorized_when_refreshed_jwks_still
     let cache = cache::Config::Memory.to_backend().unwrap();
     let stale_jwks = Jwks { keys: Vec::new() };
     cache
-        .store(&jwks_cache_key(&provider), &stale_jwks, 3600)
+        .store(&issuer_key(&provider, "jwks"), &stale_jwks, 3600)
         .await
         .unwrap();
 

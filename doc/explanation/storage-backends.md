@@ -118,7 +118,7 @@ root_dir = "/data"
 sync_to_disk = true  # fsync after writes
 ```
 
-- `sync_to_disk = true`: Every write is flushed to disk with `fsync()`, guaranteeing durability at the cost of higher write latency.
+- `sync_to_disk = true`: Every object's bytes are fsynced before the object becomes visible, uploads included, at the cost of higher write latency. Directory entries are not fsynced, so a crash can still lose the last rename on a filesystem that does not order them.
 - `sync_to_disk = false` (default): Relies on OS page cache for better performance. Acceptable when the underlying storage already provides durability guarantees (e.g., battery-backed RAID, ZFS, cloud block storage with replication). Without such guarantees, data may be lost on crash or power failure.
 
 ---
@@ -349,7 +349,7 @@ copy limits without proxying blob bytes through Angos.
 
 When using S3 for metadata, Angos includes several optimizations to reduce round-trips and improve scalability:
 
-**Link cache**: A read-through cache for link metadata (tags, layer links). Populated on both read and write, invalidated on delete. Configurable TTL (default 30 s, `link_cache_ttl = 0` to disable). Shares the same cache backend (in-memory or Redis) as authentication tokens.
+**Link cache**: A read-through cache for link metadata (tags, revisions, referrers). Populated on both read and write, and invalidated on delete by the instance that performed it, so the TTL is what bounds a stale entry elsewhere. Configurable TTL (default 30 s, `link_cache_ttl = 0` to disable), and it applies to every kind: nothing is pinned for longer. Shares the same cache backend (in-memory or Redis) as authentication tokens.
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 
@@ -500,9 +500,11 @@ The one place a writer and a collector must agree is blob reclamation, and it
 is a marker protocol rather than a lock. A collector about to delete blob
 data publishes a run marker under `v2/gc/` naming the digest range it is
 working on, re-reads its own marker before the irreversible delete, and
-removes it afterwards. A writer that has just written its reference keys
-lists `v2/gc/` once: an unexpired run covering one of its digests means back
-off briefly. Freshly written blob data and fresh reference keys are
+expires it a few seconds afterwards rather than removing it, so a writer whose
+reference landed after the run's last liveness listing still finds it. A
+writer that has just written its reference keys lists `v2/gc/` once: an
+unexpired run covering one of its digests means back off briefly, and an
+expired one is reaped where it is found. Freshly written blob data and fresh reference keys are
 unconditionally live for a grace period, which is what lets uploads and
 pushes skip any coordination for new bytes. Deletes only remove records and
 ownership keys; the bytes wait for a collector sweep (`angos scrub`), which

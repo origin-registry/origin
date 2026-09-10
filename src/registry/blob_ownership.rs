@@ -5,7 +5,7 @@ use angos_oci::{Digest, Namespace, UploadSessionId};
 use crate::registry::{
     Error,
     blob_store::BlobStore,
-    metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
+    metadata_store::{BlobIndex, BlobIndexOperation, LinkKind, MetadataStore},
 };
 
 /// Promote the upload session's staged bytes to the canonical blob path and
@@ -24,7 +24,7 @@ pub async fn promote_and_grant(
         Ok(_) => {
             // The bytes may be old, so the guarded grant catches a mid-flight
             // reclaim; only vanished bytes fall back to a fresh promotion.
-            match BlobOwnership::new(metadata_store)
+            match metadata_store
                 .grant_existing(blob_store, namespace, digest)
                 .await?
             {
@@ -43,9 +43,15 @@ pub async fn promote_and_grant(
     blob_store
         .complete_upload(namespace, session_key, digest, hashed_size)
         .await?;
-    BlobOwnership::new(metadata_store)
-        .grant(namespace, digest)
-        .await
+    metadata_store.grant(namespace, digest).await
+}
+
+/// A missing entry read as `default`; any other failure stands.
+fn absent_as<T>(result: Result<T, Error>, default: T) -> Result<T, Error> {
+    match result {
+        Err(Error::NotFound) => Ok(default),
+        other => other,
+    }
 }
 
 /// Outcome of a guarded grant against pre-existing bytes.
@@ -60,26 +66,17 @@ pub enum GrantOutcome {
     ReclaimBlocked,
 }
 
-pub struct BlobOwnership<'a> {
-    metadata_store: &'a MetadataStore,
-}
-
-impl<'a> BlobOwnership<'a> {
-    pub fn new(metadata_store: &'a MetadataStore) -> Self {
-        Self { metadata_store }
-    }
-
+impl MetadataStore {
     /// Insert `namespace`'s blob ownership reference with one idempotent put.
     /// Correct on its own only for freshly written bytes, which the grace
     /// period covers; pre-existing bytes need [`Self::grant_existing`].
     pub async fn grant(&self, namespace: &Namespace, digest: &Digest) -> Result<(), Error> {
-        self.metadata_store
-            .update_blob_index(
-                namespace,
-                digest,
-                BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
-            )
-            .await
+        self.update_blob_index(
+            namespace,
+            digest,
+            BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
+        )
+        .await
     }
 
     /// Grant a reference to bytes that already exist (a mount, a cache fill, a
@@ -93,7 +90,7 @@ impl<'a> BlobOwnership<'a> {
         digest: &Digest,
     ) -> Result<GrantOutcome, Error> {
         self.grant(namespace, digest).await?;
-        if !self.metadata_store.gc_clear(&[digest]).await? {
+        if !self.gc_clear(&[digest]).await? {
             return Ok(GrantOutcome::ReclaimBlocked);
         }
         match blob_store.size(digest).await {
@@ -106,7 +103,7 @@ impl<'a> BlobOwnership<'a> {
     pub async fn can_read(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
         // The own key grants directly, so one head answers the common case
         // before the fuller reference listing.
-        if self.metadata_store.has_own_grant(namespace, digest).await? {
+        if self.has_own_grant(namespace, digest).await? {
             return Ok(true);
         }
         // Writers never remove reference entries, so a non-own entry counts
@@ -117,11 +114,7 @@ impl<'a> BlobOwnership<'a> {
             if matches!(link, LinkKind::Blob(link_digest) if link_digest == digest) {
                 return Ok(true);
             }
-            if self
-                .metadata_store
-                .reference_backed(namespace, link, digest)
-                .await?
-            {
+            if self.reference_backed(namespace, link, digest).await? {
                 return Ok(true);
             }
         }
@@ -133,11 +126,7 @@ impl<'a> BlobOwnership<'a> {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HashSet<LinkKind>, Error> {
-        match self
-            .metadata_store
-            .read_blob_index_namespace(namespace, digest)
-            .await
-        {
+        match self.read_blob_index_namespace(namespace, digest).await {
             Ok(links) => Ok(links),
             Err(Error::NotFound) => Ok(HashSet::new()),
             Err(error) => Err(error),
@@ -147,12 +136,7 @@ impl<'a> BlobOwnership<'a> {
     /// Every local namespace referencing `digest`, per the blob index; empty
     /// when none do, a missing index entry included.
     pub async fn referencing_namespaces(&self, digest: &Digest) -> Result<Vec<Namespace>, Error> {
-        let index = match self.metadata_store.read_blob_index(digest).await {
-            Ok(index) => index,
-            Err(Error::NotFound) => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-
+        let index = absent_as(self.read_blob_index(digest).await, BlobIndex::default())?;
         Ok(index.namespace.into_keys().collect())
     }
 
@@ -163,12 +147,7 @@ impl<'a> BlobOwnership<'a> {
         digest: &Digest,
         exclude: &str,
     ) -> Result<Option<Namespace>, Error> {
-        let index = match self.metadata_store.read_blob_index(digest).await {
-            Ok(index) => index,
-            Err(Error::NotFound) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-
+        let index = absent_as(self.read_blob_index(digest).await, BlobIndex::default())?;
         Ok(index
             .namespace
             .into_keys()

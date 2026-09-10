@@ -34,7 +34,6 @@ use crate::{
     metrics_provider,
     registry::{
         Error, Registry,
-        blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody, tag_ord},
         repository::Config as RepositoryConfig,
         test_utils::{
@@ -672,7 +671,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
         .await
         .expect("permissive registry accepts a push referencing unowned blobs");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(ownership.can_read(&owner, &layer_digest).await.unwrap());
     assert!(ownership.can_read(&owner, &config_digest).await.unwrap());
     assert!(
@@ -724,7 +723,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
         .await
         .expect("permissive registry accepts an index referencing an unowned child manifest");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(ownership.can_read(&owner, &child_digest).await.unwrap());
     assert!(
         !ownership.can_read(&attacker, &child_digest).await.unwrap(),
@@ -784,7 +783,7 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
         .await
         .expect("permissive registry accepts a push referencing owned blobs");
 
-    let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
+    let ownership = permissive.metadata_store.as_ref();
     assert!(
         ownership
             .can_read(&namespace, &config_digest)
@@ -1456,7 +1455,7 @@ async fn delete_manifest_leaves_bytes_for_the_collector() {
         let digest = response.digest.clone();
 
         // A second repo holds a reference; the delete must not touch the bytes.
-        let ownership = BlobOwnership::new(registry.metadata_store.as_ref());
+        let ownership = registry.metadata_store.as_ref();
         ownership.grant(second, &digest).await.unwrap();
         let reference = Reference::Digest(digest.clone());
         registry
@@ -1642,7 +1641,7 @@ async fn delete_manifest_then_delete_uploaded_blobs() {
             .unwrap();
 
         // Ownership revoked; the stale entries and the bytes wait for the collector.
-        let ownership = registry.blob_ownership();
+        let ownership = registry.metadata_store();
         for digest in [&layer_digest, &config_digest] {
             let refs = ownership.references(namespace, digest).await.unwrap();
             assert!(
@@ -2911,7 +2910,7 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
 
     let manifest_digest = Digest::sha256_of_bytes(b"granted-manifest");
     let layer_digest = Digest::sha256_of_bytes(b"granted-layer");
-    BlobOwnership::new(&store)
+    store
         .grant(&namespace, &layer_digest)
         .await
         .expect("seed the layer's ownership grant");
@@ -4243,14 +4242,15 @@ mod dispatch_replication_tests {
         mode: ReplicationMode,
         namespace_filter: Vec<Regex>,
     ) -> ReplicationDownstream {
-        ReplicationDownstream::builder(
-            name.to_string(),
-            downstream_client("https://unused.test"),
-            4,
-        )
-        .mode(mode)
-        .namespace_filter(namespace_filter)
-        .build()
+        ReplicationDownstream {
+            mode,
+            namespace_filter,
+            ..ReplicationDownstream::new(
+                name.to_string(),
+                downstream_client("https://unused.test"),
+                4,
+            )
+        }
     }
 
     fn repository_with(mode: ReplicationMode, namespace_filter: Vec<Regex>) -> Repository {
@@ -4608,30 +4608,48 @@ async fn backdated_source_ts_loses_to_newer_local_tag() {
     );
 }
 
-/// A push at an immutable tag is refused by the registry, before the manifest
-/// body is read.
+/// A manifest and a rebuild of it, differing only by an annotation.
+const RELEASE: &[u8] =
+    br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+const REBUILD: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","annotations":{"build":"2"}}"#;
+
+/// Immutability protects a tag from being moved, not from being created: the
+/// how-to promises the first push succeeds and only a second with different
+/// content fails. Refusing the create would make a release tag impossible to
+/// publish with the flag on.
 #[tokio::test]
-async fn a_by_tag_push_at_an_immutable_tag_is_refused() {
+async fn an_immutable_tag_refuses_an_overwrite_but_not_its_first_push() {
     let test_case = FSRegistryTestCase::with_immutable_tags();
     let registry = test_case.registry();
     let namespace = Namespace::new("test-repo/app").unwrap();
+    let tag = Tag::new("v1.0.0").unwrap();
 
-    let result = registry
-        .accept_put_manifest(
-            None,
-            PutManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Tag(Tag::new("v1.0.0").unwrap()),
-                content_type: Some(MediaType::oci_manifest()),
-                tags: Vec::new(),
-                source_ts: None,
-            },
-            Cursor::new(b"{}".to_vec()),
-        )
-        .await;
+    let push = async |body: &'static [u8]| {
+        registry
+            .accept_put_manifest(
+                None,
+                PutManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(tag.clone()),
+                    content_type: Some(MediaType::oci_manifest()),
+                    tags: Vec::new(),
+                    source_ts: None,
+                },
+                Cursor::new(body.to_vec()),
+            )
+            .await
+    };
 
+    push(RELEASE)
+        .await
+        .expect("the first push of an immutable tag must succeed");
+    push(RELEASE)
+        .await
+        .expect("a re-push of what the tag already holds moves nothing");
+
+    let result = push(REBUILD).await;
     let Err(Error::Conflict(msg)) = result else {
-        panic!("an immutable tag must be refused, got: {result:?}");
+        panic!("moving an immutable tag must be refused, got: {result:?}");
     };
     assert!(
         msg.contains("v1.0.0") && msg.contains("immutable"),
@@ -4639,32 +4657,38 @@ async fn a_by_tag_push_at_an_immutable_tag_is_refused() {
     );
 }
 
-/// A by-digest push carrying an immutable tag in `?tag=` is refused too: the
-/// registry would otherwise create that tag over the protected one.
+/// The `?tag=` path carries the same rule: a by-digest push may create the
+/// immutable tag, and may not point it somewhere else afterwards.
 #[tokio::test]
-async fn a_by_digest_push_creating_an_immutable_tag_is_refused() {
+async fn a_by_digest_push_may_create_an_immutable_tag_but_not_move_it() {
     let test_case = FSRegistryTestCase::with_immutable_tags();
     let registry = test_case.registry();
     let namespace = Namespace::new("test-repo/app").unwrap();
-    let digest = Digest::sha256_of_bytes(b"{}");
 
-    let result = registry
-        .accept_put_manifest(
-            None,
-            PutManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Digest(digest),
-                content_type: Some(MediaType::oci_manifest()),
-                tags: vec![Tag::new("v1.0.0").unwrap()],
-                source_ts: None,
-            },
-            Cursor::new(b"{}".to_vec()),
-        )
-        .await;
+    let push = async |body: &'static [u8]| {
+        registry
+            .accept_put_manifest(
+                None,
+                PutManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Digest(Digest::sha256_of_bytes(body)),
+                    content_type: Some(MediaType::oci_manifest()),
+                    tags: vec![Tag::new("v1.0.0").unwrap()],
+                    source_ts: None,
+                },
+                Cursor::new(body.to_vec()),
+            )
+            .await
+    };
 
+    push(RELEASE)
+        .await
+        .expect("a `?tag=` creating an immutable tag must succeed");
+
+    let result = push(REBUILD).await;
     assert!(
         matches!(result, Err(Error::Conflict(_))),
-        "a `?tag=` creating an immutable tag must be refused, got: {result:?}"
+        "a `?tag=` moving an immutable tag must be refused, got: {result:?}"
     );
 }
 

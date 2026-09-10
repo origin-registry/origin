@@ -1,8 +1,6 @@
 use serde::Deserialize;
 
-use crate::configuration::listeners::{
-    InsecureListenerConfig, ListenerBaseConfig, ServerTlsConfig, TlsListenerConfig,
-};
+use crate::configuration::listeners::{ListenerBaseConfig, ServerTlsConfig, TlsListenerConfig};
 
 /// Which listener the `[server]` section asks for.
 ///
@@ -14,7 +12,7 @@ use crate::configuration::listeners::{
 #[serde(from = "ServerConfigFields")]
 pub enum ServerConfig {
     Tls(TlsListenerConfig),
-    Insecure(InsecureListenerConfig),
+    Insecure(ListenerBaseConfig),
 }
 
 #[derive(Deserialize)]
@@ -31,7 +29,7 @@ impl From<ServerConfigFields> for ServerConfig {
                 base: fields.base,
                 tls,
             }),
-            None => Self::Insecure(InsecureListenerConfig { base: fields.base }),
+            None => Self::Insecure(fields.base),
         }
     }
 }

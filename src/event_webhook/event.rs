@@ -6,7 +6,7 @@ use angos_oci::{Digest, Namespace, Reference, Tag};
 
 use crate::identity::ClientIdentity;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
     #[serde(rename = "manifest.push")]
     ManifestPush,
@@ -35,15 +35,6 @@ impl EventKind {
             EventKind::TagCreate => "tag.create",
             EventKind::TagDelete => "tag.delete",
         }
-    }
-}
-
-/// Serialized from [`EventKind::as_str`], the same string the
-/// `X-Registry-Event` header carries, so the header and the body cannot name
-/// one event differently.
-impl Serialize for EventKind {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
     }
 }
 

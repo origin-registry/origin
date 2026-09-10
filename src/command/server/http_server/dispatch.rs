@@ -26,10 +26,7 @@ use crate::{
     event_webhook::event::EventActor,
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
-    registry::{
-        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
-        ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
-    },
+    registry::{self, DeleteJobRequest, ListJobsRequest, ListPullsRequest, RetryJobRequest},
 };
 
 #[instrument(skip(context, req, action))]
@@ -276,12 +273,8 @@ async fn dispatch_route<'a>(
         Action::ListTags { namespace, n, last } => Ok(registry
             .list_tag_entries(ListTagsRequest { namespace, n, last })
             .await?),
-        Action::ListRevisions { namespace } => Ok(registry
-            .get_revisions_info(ListRevisionsRequest { namespace })
-            .await?),
-        Action::ListUploads { namespace } => Ok(registry
-            .get_uploads_info(ListUploadsRequest { namespace })
-            .await?),
+        Action::ListRevisions { namespace } => Ok(registry.get_revisions_info(&namespace).await?),
+        Action::ListUploads { namespace } => Ok(registry.get_uploads_info(&namespace).await?),
         Action::ListPulls {
             namespace,
             reference,
@@ -292,9 +285,9 @@ async fn dispatch_route<'a>(
             })
             .await?),
         Action::ListRepositories => Ok(registry.get_repositories_info().await?),
-        Action::ListNamespaces { repository } => Ok(registry
-            .get_namespaces_info(ListNamespacesRequest { repository })
-            .await?),
+        Action::ListNamespaces { repository } => {
+            Ok(registry.get_namespaces_info(&repository).await?)
+        }
         Action::ListJobs { queue, n, after } => Ok(registry
             .get_jobs_info(ListJobsRequest { queue, n, after })
             .await?),

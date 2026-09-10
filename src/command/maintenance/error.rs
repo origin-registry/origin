@@ -36,14 +36,8 @@ impl From<BootstrapError> for Error {
     fn from(e: BootstrapError) -> Self {
         match e {
             BootstrapError::Cache(inner) => Error::Cache(inner),
-            BootstrapError::Repository { name, source } => Error::Initialization(format!(
-                "Failed to initialize repository '{name}': {source}"
-            )),
-            BootstrapError::Overlap(inner) => Error::Initialization(inner.to_string()),
-            BootstrapError::JobQueue(inner) => Error::Initialization(inner.to_string()),
-            BootstrapError::StorageBackend(inner) => Error::Initialization(inner),
-            BootstrapError::EventWebhook(inner) => Error::Initialization(inner.to_string()),
             BootstrapError::Registry(inner) => Error::from(inner),
+            other => Error::Initialization(other.to_string()),
         }
     }
 }

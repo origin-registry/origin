@@ -74,26 +74,9 @@ fn write_failure(op: &str, status: StatusCode) -> Error {
 }
 
 impl RegistryClient {
-    /// Sends a byte-bodied request via [`RegistryClient::send_with_auth_retry`].
-    ///
-    /// `source_ts`, when set, stamps the `X-Angos-Source-Timestamp`
-    /// last-writer-wins header.
-    async fn send_body(
-        &self,
-        method: &Method,
-        location: &str,
-        content_type: Option<&str>,
-        body: Vec<u8>,
-        source_ts: Option<&str>,
-    ) -> Result<Response, Error> {
-        Ok(self
-            .send_body_with_auth(method, location, content_type, body, source_ts)
-            .await?
-            .0)
-    }
-
-    /// [`Self::send_body`] that also returns the resolved auth header, so an
-    /// upload-session opener can reuse it for the single-use streamed `PATCH`.
+    /// Sends a replayable body under the auth retry, also returning the
+    /// resolved auth header so an upload-session opener can reuse it for the
+    /// single-use streamed `PATCH`.
     async fn send_body_with_auth(
         &self,
         method: &Method,
@@ -343,8 +326,9 @@ impl RegistryClient {
         let location = append_query(session_url, &format!("digest={digest}"));
 
         let response = self
-            .send_body(&Method::PUT, &location, None, Vec::new(), None)
-            .await?;
+            .send_body_with_auth(&Method::PUT, &location, None, Vec::new(), None)
+            .await?
+            .0;
 
         if !response.status().is_success() {
             return Err(write_failure("complete_upload", response.status()));
@@ -365,8 +349,9 @@ impl RegistryClient {
     #[instrument(skip(self))]
     pub async fn delete_upload(&self, session_url: &str) -> Result<(), Error> {
         let response = self
-            .send_body(&Method::DELETE, session_url, None, Vec::new(), None)
-            .await?;
+            .send_body_with_auth(&Method::DELETE, session_url, None, Vec::new(), None)
+            .await?
+            .0;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(());
@@ -413,14 +398,15 @@ impl RegistryClient {
         let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
         let source_ts = request.source_ts.map(|ts| ts.to_rfc3339());
         let response = self
-            .send_body(
+            .send_body_with_auth(
                 &Method::PUT,
                 &location,
                 request.content_type.as_ref().map(MediaType::as_ref),
                 body,
                 source_ts.as_deref(),
             )
-            .await?;
+            .await?
+            .0;
 
         if response.status() == StatusCode::CONFLICT {
             Self::classify_conflict(response, "put_manifest").await?;
@@ -465,14 +451,15 @@ impl RegistryClient {
         let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
         let source_ts = request.source_ts.map(|ts| ts.to_rfc3339());
         let response = self
-            .send_body(
+            .send_body_with_auth(
                 &Method::DELETE,
                 &location,
                 None,
                 Vec::new(),
                 source_ts.as_deref(),
             )
-            .await?;
+            .await?
+            .0;
 
         if response.status() == StatusCode::CONFLICT {
             Self::classify_conflict(response, "delete_manifest").await?;

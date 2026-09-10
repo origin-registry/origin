@@ -735,7 +735,7 @@ async fn authorize_mount_source_requires_read_on_the_source() {
         let metadata_store = test_case.metadata_store();
         let digest = put_blob_direct(metadata_store.object_store(), content).await;
         registry
-            .blob_ownership()
+            .metadata_store()
             .grant(source, &digest)
             .await
             .unwrap();

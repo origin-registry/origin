@@ -21,12 +21,11 @@ use angos_storage::{
 };
 
 use crate::jobs::store::{
-    ClaimCheck, ClaimMode, ClaimedJob, CompleteOutcome, FailOutcome, JOBS_ROOT, JobEnvelope,
-    JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING, Queue,
-    QueueDepthRefresh, STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path,
+    ClaimCheck, ClaimMode, ClaimedJob, CompleteOutcome, DeadLetterRecord, FailOutcome, JOBS_ROOT,
+    JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING,
+    Queue, QueueDepthRefresh, STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path,
     job_lock_key_index_path, job_pending_path, make_storage_key, parse_lock_key_index,
-    parse_not_before, queue_depth_refresh_loop, serialize_dead_letter, serialize_lock_key_index,
-    should_cancel_claim,
+    parse_not_before, queue_depth_refresh_loop, serialize_lock_key_index, should_cancel_claim,
 };
 use crate::metrics_provider;
 
@@ -848,7 +847,12 @@ async fn retry_failed_resets_attempts() {
     let mut env = dummy_envelope("cache.ns:sha256:retry-failed");
     env.attempts = 3;
     let key = make_storage_key(Utc::now(), &env.id);
-    let body = serialize_dead_letter(&env, "boom").expect("serialize");
+    let body = serde_json::to_vec(&DeadLetterRecord {
+        envelope: env,
+        last_error: "boom".to_string(),
+        failed_at: Utc::now(),
+    })
+    .expect("serialize");
     h.raw
         .put(
             &crate::jobs::store::job_failed_path("cache", &key),
@@ -907,7 +911,12 @@ async fn delete_failed_record() {
     let h = harness();
     let env = dummy_envelope("cache.ns:sha256:del-failed");
     let key = make_storage_key(Utc::now(), &env.id);
-    let body = serialize_dead_letter(&env, "boom").expect("serialize");
+    let body = serde_json::to_vec(&DeadLetterRecord {
+        envelope: env,
+        last_error: "boom".to_string(),
+        failed_at: Utc::now(),
+    })
+    .expect("serialize");
     h.raw
         .put(
             &crate::jobs::store::job_failed_path("cache", &key),

@@ -198,13 +198,11 @@ pub fn snapshot_diff(a: &Snapshot, b: &Snapshot) -> Vec<String> {
 
 /// Persist a snapshot as sorted `key<TAB>hash` lines for failure forensics.
 pub fn write_snapshot(path: &Path, snap: &Snapshot) -> GateResult<()> {
-    let mut out = String::new();
-    for (key, hash) in snap {
-        out.push_str(key);
-        out.push('\t');
-        out.push_str(hash);
-        out.push('\n');
-    }
+    let out = snap
+        .iter()
+        .map(|(key, hash)| format!("{key}\t{hash}\n"))
+        .collect::<Vec<_>>()
+        .concat();
     write(path, out)?;
     Ok(())
 }

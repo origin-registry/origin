@@ -45,25 +45,34 @@ impl Backend {
     /// (part size and copy chunk size both between 5 MiB and 5 GiB) are
     /// violated, or when the underlying HTTP client fails to initialise.
     pub fn new(config: &BackendConfig) -> Result<Self, Error> {
-        if config.multipart_part_size < ByteSize::mib(5) {
-            return Err(Error::Configuration(
-                "Multipart part size must be at least 5MiB".to_string(),
-            ));
-        }
-        if config.multipart_part_size > ByteSize::gib(5) {
-            return Err(Error::Configuration(
-                "Multipart part size must be at most 5GiB".to_string(),
-            ));
-        }
-        if config.multipart_copy_chunk_size > ByteSize::gib(5) {
-            return Err(Error::Configuration(
-                "Multipart copy chunk size must be at most 5GiB".to_string(),
-            ));
-        }
-        if config.multipart_copy_chunk_size < ByteSize::mib(5) {
-            return Err(Error::Configuration(
-                "Multipart copy chunk size must be at least 5MiB".to_string(),
-            ));
+        let constraints = [
+            (
+                config.multipart_part_size >= ByteSize::mib(5),
+                "Multipart part size must be at least 5MiB",
+            ),
+            (
+                config.multipart_part_size <= ByteSize::gib(5),
+                "Multipart part size must be at most 5GiB",
+            ),
+            (
+                config.multipart_copy_chunk_size <= ByteSize::gib(5),
+                "Multipart copy chunk size must be at most 5GiB",
+            ),
+            (
+                config.multipart_copy_chunk_size >= ByteSize::mib(5),
+                "Multipart copy chunk size must be at least 5MiB",
+            ),
+            (
+                config.circuit_breaker_threshold > 0,
+                "Circuit breaker threshold must be at least 1",
+            ),
+            (
+                config.operation_timeout_secs > 0 && config.operation_attempt_timeout_secs > 0,
+                "Operation timeouts must be at least 1 second",
+            ),
+        ];
+        if let Some((_, message)) = constraints.iter().find(|(holds, _)| !holds) {
+            return Err(Error::Configuration((*message).to_string()));
         }
 
         let s3_client = client::S3Client::new(config)
@@ -84,8 +93,10 @@ impl Backend {
     }
 
     /// Run `op` behind the circuit breaker: fail fast while the breaker is
-    /// open, otherwise execute it and feed the outcome back. `NotFound` and
-    /// `PreconditionFailed` count as success since the backend answered.
+    /// open, otherwise execute it and feed the outcome back. `NotFound`,
+    /// `PreconditionFailed` and `Rejected` count as success since the backend
+    /// answered; only a transport failure or a 5xx says it is unhealthy, so a
+    /// single denied action cannot cascade into an outage.
     ///
     /// # Errors
     /// Returns [`Error::Io`] when the circuit breaker has tripped on repeated
@@ -94,7 +105,7 @@ impl Backend {
         self.circuit_breaker.check()?;
         let result = op.await;
         match &result {
-            Ok(_) | Err(Error::PreconditionFailed | Error::NotFound(_)) => {
+            Ok(_) | Err(Error::PreconditionFailed | Error::NotFound(_) | Error::Rejected(_)) => {
                 self.circuit_breaker.record_success();
             }
             Err(_) => self.circuit_breaker.record_failure(),
@@ -114,7 +125,7 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::{ops::aggregate_batch_delete_errors, *};
+    use super::*;
     use crate::test_util::mock_config;
 
     fn test_config(overrides: impl FnOnce(&mut BackendConfig)) -> BackendConfig {
@@ -144,6 +155,22 @@ mod tests {
     #[test]
     fn test_new_multipart_part_size_too_large() {
         let result = Backend::new(&test_config(|c| c.multipart_part_size = ByteSize::gib(6)));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    /// A zero threshold opens the breaker before the first failure, and a zero
+    /// timeout expires every request: both make the client answer nothing.
+    #[test]
+    fn test_new_rejects_a_zero_circuit_breaker_threshold() {
+        let result = Backend::new(&test_config(|c| c.circuit_breaker_threshold = 0));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    #[test]
+    fn test_new_rejects_zero_operation_timeouts() {
+        let result = Backend::new(&test_config(|c| c.operation_timeout_secs = 0));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+        let result = Backend::new(&test_config(|c| c.operation_attempt_timeout_secs = 0));
         assert!(matches!(result, Err(Error::Configuration(_))));
     }
 
@@ -179,22 +206,5 @@ mod tests {
     fn test_full_key_with_prefix() {
         let backend = Backend::new(&test_config(|c| c.key_prefix = "prefix".to_string())).unwrap();
         assert_eq!(backend.full_key("test/file.txt"), "prefix/test/file.txt");
-    }
-
-    #[test]
-    fn test_aggregate_batch_delete_errors_joins_messages() {
-        let errors = vec!["first failure".to_string(), "second failure".to_string()];
-        let err =
-            aggregate_batch_delete_errors(&errors).expect("non-empty errors must produce IoError");
-        let msg = err.to_string();
-        assert!(msg.contains("batch delete errors:"), "got: {msg}");
-        assert!(msg.contains("first failure"), "got: {msg}");
-        assert!(msg.contains("second failure"), "got: {msg}");
-        assert!(msg.contains("; "), "got: {msg}");
-    }
-
-    #[test]
-    fn test_aggregate_batch_delete_errors_empty_returns_none() {
-        assert!(aggregate_batch_delete_errors(&[]).is_none());
     }
 }

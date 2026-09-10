@@ -21,73 +21,51 @@ use crate::{
 /// exhaustion, so this only bounds memory per round-trip.
 const PAGE_SIZE: u16 = 256;
 
-/// Fan-out for the per-key payload reads within one page.
-const PAYLOAD_READ_CONCURRENCY: usize = 16;
-
-/// Which durable queue an [`OrphanJobChecker`] scans, with its per-queue
-/// orphan classification.
-#[derive(Clone, Copy)]
-pub enum OrphanQueue {
-    /// Replication jobs; orphaned when the downstream or repository is no
-    /// longer configured.
-    Replication,
-    /// Pull-through cache-fill jobs; orphaned when the repository is no longer
-    /// configured for pull-through.
-    Cache,
-}
-
-impl OrphanQueue {
-    #[must_use]
-    pub fn as_queue(self) -> Queue {
-        match self {
-            OrphanQueue::Replication => Queue::Replication,
-            OrphanQueue::Cache => Queue::Cache,
+/// Classifies one raw payload of `queue`: `Ok(Some(reason))` for an orphan,
+/// `Ok(None)` for a job that still resolves, `Err` for a payload that fails to
+/// decode. A replication job is orphaned when its downstream or repository is
+/// no longer configured, a cache fill when its repository no longer pulls
+/// through.
+fn classify(
+    queue: Queue,
+    resolver: &RepositoryResolver,
+    payload: Value,
+) -> Result<Option<String>, serde_json::Error> {
+    match queue {
+        // A downstream whose mode changed still resolves, so it is not an
+        // orphan.
+        Queue::Replication => {
+            let job: ReplicationJob = serde_json::from_value(payload)?;
+            let target = job.target();
+            let configured = resolver
+                .resolve(&target.namespace)
+                .is_some_and(|repository| {
+                    repository
+                        .replication
+                        .iter()
+                        .any(|d| d.name == target.downstream)
+                });
+            Ok((!configured).then(|| {
+                format!(
+                    "downstream '{}' is not configured for '{}'",
+                    target.downstream, target.namespace
+                )
+            }))
         }
-    }
-
-    /// Classifies one raw payload: `Ok(Some(reason))` for an orphan, `Ok(None)`
-    /// for a job that still resolves, `Err` for a payload that fails to decode.
-    fn classify(
-        self,
-        resolver: &RepositoryResolver,
-        payload: Value,
-    ) -> Result<Option<String>, serde_json::Error> {
-        match self {
-            // A downstream whose mode changed still resolves, so it is not an
-            // orphan.
-            OrphanQueue::Replication => {
-                let job: ReplicationJob = serde_json::from_value(payload)?;
-                let target = job.target();
-                let configured = resolver
-                    .resolve(&target.namespace)
-                    .is_some_and(|repository| {
-                        repository
-                            .replication
-                            .iter()
-                            .any(|d| d.name == target.downstream)
-                    });
-                Ok((!configured).then(|| {
-                    format!(
-                        "downstream '{}' is not configured for '{}'",
-                        target.downstream, target.namespace
-                    )
-                }))
-            }
-            // Such a job could still complete on drain if the blob is already
-            // local, but granting a reference to a namespace removed from
-            // pull-through config serves nothing.
-            OrphanQueue::Cache => {
-                let payload: CacheFetchBlobPayload = serde_json::from_value(payload)?;
-                let configured = resolver
-                    .resolve(&payload.namespace)
-                    .is_some_and(Repository::is_pull_through);
-                Ok((!configured).then(|| {
-                    format!(
-                        "namespace '{}' is not configured for pull-through",
-                        payload.namespace
-                    )
-                }))
-            }
+        // Such a job could still complete on drain if the blob is already
+        // local, but granting a reference to a namespace removed from
+        // pull-through config serves nothing.
+        Queue::Cache => {
+            let payload: CacheFetchBlobPayload = serde_json::from_value(payload)?;
+            let configured = resolver
+                .resolve(&payload.namespace)
+                .is_some_and(Repository::is_pull_through);
+            Ok((!configured).then(|| {
+                format!(
+                    "namespace '{}' is not configured for pull-through",
+                    payload.namespace
+                )
+            }))
         }
     }
 }
@@ -98,41 +76,35 @@ impl OrphanQueue {
 pub struct OrphanJobChecker {
     job_store: Arc<JobStore>,
     resolver: Arc<RepositoryResolver>,
-    queue: OrphanQueue,
+    queue: Queue,
     payload_read_concurrency: usize,
 }
 
 impl OrphanJobChecker {
+    /// `payload_read_concurrency` is the prune command's `--concurrency`.
     #[must_use]
     pub fn new(
         job_store: Arc<JobStore>,
         resolver: Arc<RepositoryResolver>,
-        queue: OrphanQueue,
+        queue: Queue,
+        payload_read_concurrency: usize,
     ) -> Self {
         Self {
             job_store,
             resolver,
             queue,
-            payload_read_concurrency: PAYLOAD_READ_CONCURRENCY,
+            payload_read_concurrency: payload_read_concurrency.max(1),
         }
     }
 
-    /// Override the payload-read fan-out; the prune command derives it from its
-    /// `--concurrency` option.
-    #[must_use]
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.payload_read_concurrency = concurrency.max(1);
-        self
-    }
-
     /// Reads the raw payload for one storage key, `Ok(None)` for a key that
-    /// vanished mid-scan; decoding is left to [`OrphanQueue::classify`].
+    /// vanished mid-scan; decoding is left to [`classify`].
     async fn read_payload(
         &self,
         state: JobState,
         storage_key: &str,
     ) -> Result<Option<Value>, Error> {
-        let queue = self.queue.as_queue();
+        let queue = self.queue;
         let envelope = match state {
             JobState::Pending => self.job_store.read_pending(queue, storage_key).await,
             JobState::Failed => self
@@ -156,7 +128,7 @@ impl OrphanJobChecker {
     /// Scans one queue partition to exhaustion, emitting a delete action per
     /// orphan; returns how many orphans were emitted.
     async fn scan_partition(&self, state: JobState, sink: &dyn ActionSink) -> Result<u64, Error> {
-        let queue = self.queue.as_queue();
+        let queue = self.queue;
         let mut orphans: u64 = 0;
         let mut after: Option<String> = None;
         loop {
@@ -191,7 +163,7 @@ impl OrphanJobChecker {
                 };
                 // A payload that fails to decode is skipped: prune must not
                 // delete what it cannot attribute.
-                let reason = match self.queue.classify(&self.resolver, payload) {
+                let reason = match classify(self.queue, &self.resolver, payload) {
                     Ok(reason) => reason,
                     Err(e) => {
                         warn!(
@@ -229,7 +201,7 @@ impl OrphanJobChecker {
         let failed = self.scan_partition(JobState::Failed, sink).await?;
         info!(
             "prune: found {pending} orphan pending and {failed} orphan dead-lettered {} job(s)",
-            self.queue.as_queue()
+            self.queue
         );
         Ok(())
     }
@@ -243,9 +215,8 @@ pub async fn sweep_orphan_jobs(
     sink: &dyn ActionSink,
     concurrency: usize,
 ) -> Result<(), Error> {
-    for queue in [OrphanQueue::Replication, OrphanQueue::Cache] {
-        OrphanJobChecker::new(job_store.clone(), resolver.clone(), queue)
-            .with_concurrency(concurrency)
+    for queue in [Queue::Replication, Queue::Cache] {
+        OrphanJobChecker::new(job_store.clone(), resolver.clone(), queue, concurrency)
             .check_all(sink)
             .await?;
     }
@@ -267,7 +238,7 @@ mod tests {
                 action::Action,
                 executor::{ActionSink, DryRunSink, Executor},
             },
-            prune::orphan_jobs::{OrphanJobChecker, OrphanQueue},
+            prune::orphan_jobs::{OrphanJobChecker, classify},
         },
         jobs::{
             JobState, Queue,
@@ -283,7 +254,7 @@ mod tests {
         },
         registry_client::RegistryClient,
         replication::{
-            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationJob, ReplicationMode,
+            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationJob,
             ReplicationTarget, build_envelope,
         },
     };
@@ -299,8 +270,8 @@ mod tests {
 
     /// Job store over the shared test store, under this suite's worker id.
     fn orphan_job_store(metadata_store: &MetadataStore) -> Arc<JobStore> {
-        Arc::new(JobStore::alongside(
-            metadata_store,
+        Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
             "orphan-test",
             ClaimMode::Atomic,
         ))
@@ -341,14 +312,11 @@ mod tests {
     /// Resolver with a pull-through repository whose only downstream is
     /// [`DOWNSTREAM`], plus a configured repository with no upstreams.
     fn resolver() -> Arc<RepositoryResolver> {
-        let downstream = ReplicationDownstream::builder(
+        let downstream = ReplicationDownstream::new(
             DOWNSTREAM.to_string(),
             downstream_client("http://127.0.0.1:1"),
             4,
-        )
-        .mode(ReplicationMode::EventReconcile)
-        .prune(false)
-        .build();
+        );
         let mut repositories = HashMap::new();
         repositories.insert(
             REPO.to_string(),
@@ -361,8 +329,8 @@ mod tests {
         Arc::new(RepositoryResolver::new(Arc::new(repositories)).unwrap())
     }
 
-    fn checker(job_store: Arc<JobStore>, queue: OrphanQueue) -> OrphanJobChecker {
-        OrphanJobChecker::new(job_store, resolver(), queue)
+    fn checker(job_store: Arc<JobStore>, queue: Queue) -> OrphanJobChecker {
+        OrphanJobChecker::new(job_store, resolver(), queue, 16)
     }
 
     fn push_payload(downstream: &str, namespace: &str) -> ReplicationJob {
@@ -380,7 +348,7 @@ mod tests {
     fn cache_envelope(namespace: &str) -> JobEnvelope {
         let payload = CacheFetchBlobPayload {
             namespace: Namespace::new(namespace).unwrap(),
-            digest: DIGEST.to_string(),
+            digest: DIGEST.parse().unwrap(),
         };
         JobEnvelope::new(
             Queue::Cache,
@@ -425,8 +393,7 @@ mod tests {
             "tag": "gate",
             "kind": "replication.push_manifest",
         });
-        let reason = OrphanQueue::Replication
-            .classify(&resolver(), payload)
+        let reason = classify(Queue::Replication, &resolver(), payload)
             .expect("the seeded payload must decode");
         assert!(
             reason.is_some_and(|r| r.contains("gate-ghost-downstream")),
@@ -451,7 +418,7 @@ mod tests {
         assert_eq!(keys.len(), 1);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Replication)
+        checker(job_store, Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -483,7 +450,7 @@ mod tests {
         enqueue_push(&job_store, DOWNSTREAM, NAMESPACE).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Replication)
+        checker(job_store, Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -508,7 +475,7 @@ mod tests {
         enqueue_push(&job_store, DOWNSTREAM, GHOST_NAMESPACE).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Replication)
+        checker(job_store, Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -540,7 +507,7 @@ mod tests {
         dead_letter(&job_store, Queue::Replication, envelope).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Replication)
+        checker(job_store, Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -576,7 +543,7 @@ mod tests {
         job_store.enqueue(envelope).await.unwrap();
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store.clone(), OrphanQueue::Replication)
+        checker(job_store.clone(), Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -618,7 +585,7 @@ mod tests {
 
         let mut executor: Box<dyn ActionSink> =
             Box::new(Executor::new(blob_store, metadata_store, job_store.clone()));
-        checker(job_store.clone(), OrphanQueue::Replication)
+        checker(job_store.clone(), Queue::Replication)
             .check_all(executor.as_mut())
             .await
             .unwrap();
@@ -655,7 +622,7 @@ mod tests {
         enqueue_push(&job_store, REMOVED_DOWNSTREAM, NAMESPACE).await;
 
         let sink = DryRunSink;
-        checker(job_store.clone(), OrphanQueue::Replication)
+        checker(job_store.clone(), Queue::Replication)
             .check_all(&sink)
             .await
             .unwrap();
@@ -684,7 +651,7 @@ mod tests {
         assert_eq!(keys.len(), 1);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Cache)
+        checker(job_store, Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();
@@ -716,7 +683,7 @@ mod tests {
         enqueue_cache_fill(&job_store, NAMESPACE).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Cache)
+        checker(job_store, Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();
@@ -741,7 +708,7 @@ mod tests {
         enqueue_cache_fill(&job_store, LOCAL_REPO).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Cache)
+        checker(job_store, Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();
@@ -772,7 +739,7 @@ mod tests {
         dead_letter(&job_store, Queue::Cache, cache_envelope(GHOST_NAMESPACE)).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store, OrphanQueue::Cache)
+        checker(job_store, Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();
@@ -810,7 +777,7 @@ mod tests {
         job_store.enqueue(envelope).await.unwrap();
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
-        checker(job_store.clone(), OrphanQueue::Cache)
+        checker(job_store.clone(), Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();
@@ -843,7 +810,7 @@ mod tests {
 
         let mut executor: Box<dyn ActionSink> =
             Box::new(Executor::new(blob_store, metadata_store, job_store.clone()));
-        checker(job_store.clone(), OrphanQueue::Cache)
+        checker(job_store.clone(), Queue::Cache)
             .check_all(executor.as_mut())
             .await
             .unwrap();
@@ -876,7 +843,7 @@ mod tests {
         enqueue_cache_fill(&job_store, GHOST_NAMESPACE).await;
 
         let sink = DryRunSink;
-        checker(job_store.clone(), OrphanQueue::Cache)
+        checker(job_store.clone(), Queue::Cache)
             .check_all(&sink)
             .await
             .unwrap();

@@ -143,29 +143,10 @@ impl From<auth::Error> for Error {
     }
 }
 
+// Every bootstrap failure names what it was initializing in its own message.
 impl From<bootstrap::Error> for Error {
     fn from(e: bootstrap::Error) -> Self {
-        match e {
-            bootstrap::Error::StorageBackend(inner) => {
-                Error::Initialization(format!("Failed to initialize storage handles: {inner}"))
-            }
-            bootstrap::Error::Cache(inner) => {
-                Error::Initialization(format!("Failed to initialize auth token cache: {inner}"))
-            }
-            bootstrap::Error::Repository { name, source } => Error::Initialization(format!(
-                "Failed to initialize repository '{name}': {source}"
-            )),
-            bootstrap::Error::Overlap(inner) => Error::Initialization(inner.to_string()),
-            bootstrap::Error::JobQueue(inner) => {
-                Error::Initialization(format!("Failed to initialize job queue: {inner}"))
-            }
-            bootstrap::Error::EventWebhook(inner) => {
-                Error::Initialization(format!("Failed to initialize event webhooks: {inner}"))
-            }
-            bootstrap::Error::Registry(inner) => {
-                Error::Initialization(format!("Failed to initialize registry: {inner}"))
-            }
-        }
+        Error::Initialization(e.to_string())
     }
 }
 

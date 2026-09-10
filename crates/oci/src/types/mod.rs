@@ -6,6 +6,9 @@
 pub mod constants;
 pub mod http_range;
 
+#[macro_use]
+mod str_newtype;
+
 mod descriptor;
 mod digest;
 mod error;

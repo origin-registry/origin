@@ -165,13 +165,16 @@ impl Backend {
     /// Recover an upload's in-flight state from S3: the open multipart upload id
     /// (if any) and the list of committed parts. State is read fresh on every
     /// call; nothing is persisted by the caller.
-    async fn recover_upload(&self, key: &str) -> Result<RecoveredUpload, Error> {
+    async fn recover_upload(
+        &self,
+        key: &str,
+    ) -> Result<(Option<String>, Vec<UploadedPart>), Error> {
         let upload_id = self.search_upload_id(key).await?;
         let parts = match &upload_id {
             Some(id) => self.client.list_parts(key, id).await?,
             None => Vec::new(),
         };
-        Ok(RecoveredUpload { upload_id, parts })
+        Ok((upload_id, parts))
     }
 
     /// Search the in-flight multipart uploads for the one whose key is exactly
@@ -336,12 +339,6 @@ impl Backend {
     }
 }
 
-/// In-flight multipart state recovered from S3 by [`Backend::recover_upload`].
-struct RecoveredUpload {
-    upload_id: Option<String>,
-    parts: Vec<UploadedPart>,
-}
-
 #[async_trait]
 impl ObjectStore for Backend {
     async fn get(&self, key: &str) -> Result<Vec<u8>, Error> {
@@ -470,9 +467,7 @@ impl ObjectStore for Backend {
         // Recover the in-flight state from S3: the upload id (if a multipart is
         // already open), the committed parts, and from them the committed byte
         // offset and the next part number.
-        let recovered = self.recover_upload(key).await?;
-        let mut upload_id = recovered.upload_id;
-        let mut parts = recovered.parts;
+        let (mut upload_id, mut parts) = self.recover_upload(key).await?;
         let committed_size = parts.iter().map(|p| p.size).sum::<u64>();
 
         if len == Some(0) {
@@ -544,9 +539,7 @@ impl ObjectStore for Backend {
     }
 
     async fn complete_upload(&self, key: &str) -> Result<(), Error> {
-        let recovered = self.recover_upload(key).await?;
-        let upload_id = recovered.upload_id;
-        let mut parts = recovered.parts;
+        let (upload_id, mut parts) = self.recover_upload(key).await?;
         let committed_size = parts.iter().map(|p| p.size).sum::<u64>();
 
         // The final remainder sits at the committed offset.
@@ -640,10 +633,7 @@ impl PresignedStore for Backend {
         ttl: Duration,
         content_type: Option<&str>,
     ) -> Result<String, Error> {
-        Ok(self
-            .client
-            .generate_presigned_url(key, ttl, content_type)
-            .await?)
+        Ok(self.client.generate_presigned_url(key, ttl, content_type)?)
     }
 }
 

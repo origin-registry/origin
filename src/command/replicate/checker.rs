@@ -24,10 +24,6 @@ use crate::{
     replication::{ReplicationDownstream, record_reconcile_outcome},
 };
 
-/// Fan-out for the local tag-digest link reads collected before reconciling a
-/// namespace's downstreams.
-const TAG_RESOLVE_CONCURRENCY: usize = 16;
-
 /// Enqueues a replication push for each diverging or downstream-missing tag, and
 /// for a `prune = true` downstream (one-way mirror) a replication delete for each
 /// downstream-only tag.
@@ -38,21 +34,19 @@ pub struct ReplicationChecker {
 }
 
 impl ReplicationChecker {
+    /// `tag_resolve_concurrency` bounds the local tag-digest link reads
+    /// collected before reconciling a namespace's downstreams.
     #[must_use]
-    pub fn new(metadata_store: Arc<MetadataStore>, resolver: Arc<RepositoryResolver>) -> Self {
+    pub fn new(
+        metadata_store: Arc<MetadataStore>,
+        resolver: Arc<RepositoryResolver>,
+        tag_resolve_concurrency: usize,
+    ) -> Self {
         Self {
             metadata_store,
             resolver,
-            tag_resolve_concurrency: TAG_RESOLVE_CONCURRENCY,
+            tag_resolve_concurrency: tag_resolve_concurrency.max(1),
         }
-    }
-
-    /// Override the per-tag digest-resolve fan-out; the replicate command
-    /// derives it from `global.max_concurrent_replication_jobs`.
-    #[must_use]
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.tag_resolve_concurrency = concurrency.max(1);
-        self
     }
 
     fn downstream_included(downstream: &ReplicationDownstream, namespace: &Namespace) -> bool {
@@ -94,7 +88,7 @@ impl ReplicationChecker {
         &self,
         downstream: &ReplicationDownstream,
         namespace: &Namespace,
-        local_tags: &[LocalTag],
+        local_tags: &[(Tag, Option<Digest>)],
         sink: &dyn ActionSink,
     ) {
         reconcile_push_step(downstream, namespace, local_tags, sink).await;
@@ -138,10 +132,7 @@ impl ReplicationChecker {
 
         // An unresolved tag still counts as local: prune must never delete a
         // tag that exists locally.
-        let local_set: HashSet<&str> = local_tags
-            .iter()
-            .map(|local| local.tag().as_ref())
-            .collect();
+        let local_set: HashSet<&str> = local_tags.iter().map(|(tag, _)| tag.as_ref()).collect();
         for tag in downstream_tags {
             if local_set.contains(tag.as_ref()) {
                 continue;
@@ -175,7 +166,7 @@ impl ReplicationChecker {
 async fn reconcile_push_step(
     downstream: &ReplicationDownstream,
     namespace: &Namespace,
-    local_tags: &[LocalTag],
+    local_tags: &[(Tag, Option<Digest>)],
     sink: &dyn ActionSink,
 ) {
     enum Probe {
@@ -199,10 +190,7 @@ async fn reconcile_push_step(
 
     let candidates: Vec<(Tag, Digest)> = local_tags
         .iter()
-        .filter_map(|local| match local {
-            LocalTag::Resolved { tag, digest } => Some((tag.clone(), digest.clone())),
-            LocalTag::Unresolved { .. } => None,
-        })
+        .filter_map(|(tag, digest)| Some((tag.clone(), digest.clone()?)))
         .collect();
     let probes = stream::iter(candidates)
         .map(|(tag, local)| async move {
@@ -287,27 +275,6 @@ async fn reconcile_push_step(
     }
 }
 
-/// A local tag as the reconcile snapshot saw it. Both variants count as local,
-/// so the prune step never deletes either; only a resolved one can be pushed.
-enum LocalTag {
-    Resolved {
-        tag: Tag,
-        digest: Digest,
-    },
-    /// The link read failed, so the digest is unknown for this pass.
-    Unresolved {
-        tag: Tag,
-    },
-}
-
-impl LocalTag {
-    fn tag(&self) -> &Tag {
-        match self {
-            LocalTag::Resolved { tag, .. } | LocalTag::Unresolved { tag } => tag,
-        }
-    }
-}
-
 #[async_trait]
 impl NamespaceChecker for ReplicationChecker {
     async fn check(&self, namespace: &Namespace, sink: &dyn ActionSink) -> Result<(), Error> {
@@ -326,16 +293,15 @@ impl NamespaceChecker for ReplicationChecker {
         }
 
         // Resolved once, not per downstream, to avoid O(downstreams x tags)
-        // metadata reads.
-        let local_tags: Vec<LocalTag> = self
+        // metadata reads. A tag whose link read failed keeps a `None` digest:
+        // it still counts as local for prune, and only a resolved one pushes.
+        let local_tags: Vec<(Tag, Option<Digest>)> = self
             .metadata_store
             .stream_tags(namespace)
             .err_into::<Error>()
             .map_ok(|tag| async move {
-                Ok(match self.local_digest(namespace, &tag).await {
-                    Some(digest) => LocalTag::Resolved { tag, digest },
-                    None => LocalTag::Unresolved { tag },
-                })
+                let digest = self.local_digest(namespace, &tag).await;
+                Ok((tag, digest))
             })
             .try_buffered(self.tag_resolve_concurrency)
             .try_collect()
@@ -405,12 +371,11 @@ mod tests {
     fn repository(client: Arc<RegistryClient>, mode: ReplicationMode, prune: bool) -> Repository {
         repository_with_replication(
             REPO,
-            vec![
-                ReplicationDownstream::builder(DOWNSTREAM.to_string(), client, 4)
-                    .mode(mode)
-                    .prune(prune)
-                    .build(),
-            ],
+            vec![ReplicationDownstream {
+                mode,
+                prune,
+                ..ReplicationDownstream::new(DOWNSTREAM.to_string(), client, 4)
+            }],
         )
     }
 
@@ -423,16 +388,13 @@ mod tests {
     ) -> Repository {
         repository_with_replication(
             REPO,
-            vec![
-                ReplicationDownstream::builder(DOWNSTREAM.to_string(), client, 4)
-                    .namespace_mapping(
-                        Some(Namespace::new("nginx").unwrap()),
-                        Some(Namespace::new("mirror").unwrap()),
-                    )
-                    .mode(mode)
-                    .prune(prune)
-                    .build(),
-            ],
+            vec![ReplicationDownstream {
+                local_namespace: Some(Namespace::new("nginx").unwrap()),
+                target_namespace: Some(Namespace::new("mirror").unwrap()),
+                mode,
+                prune,
+                ..ReplicationDownstream::new(DOWNSTREAM.to_string(), client, 4)
+            }],
         )
     }
 
@@ -475,7 +437,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -525,7 +487,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&content, &sink).await.unwrap();
@@ -599,13 +561,13 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::alongside(
-            &metadata_store,
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
             "scrub-test",
             ClaimMode::Atomic,
         ));
 
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone(), 16);
 
         let mut executor: Box<dyn ActionSink> = Box::new(Executor::new(
             blob_store.clone(),
@@ -676,7 +638,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         // Metrics are process-global and shared across tests: assert a delta.
         let skipped_before = crate::metrics_provider::metrics_provider()
@@ -757,7 +719,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink = FlakySink {
             attempted: std::sync::Mutex::new(Vec::new()),
@@ -802,7 +764,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink = FlakySink {
             attempted: std::sync::Mutex::new(Vec::new()),
@@ -861,7 +823,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -912,7 +874,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -961,7 +923,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1026,7 +988,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1088,6 +1050,7 @@ mod tests {
                 ReplicationMode::EventReconcile,
                 true,
             )),
+            16,
         );
 
         // The empty snapshot stands in for one taken before `fresh` existed.
@@ -1154,7 +1117,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1213,7 +1176,7 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1253,7 +1216,7 @@ mod tests {
             ReplicationMode::EventOnly,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1297,7 +1260,7 @@ mod tests {
             ReplicationMode::ReconcileOnly,
             false,
         ));
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver, 16);
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &sink).await.unwrap();
@@ -1400,13 +1363,13 @@ mod tests {
             false,
         ));
 
-        let job_store = Arc::new(JobStore::alongside(
-            &metadata_store,
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
             "scrub-test",
             ClaimMode::Atomic,
         ));
 
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone(), 16);
 
         let captured: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker.check(&namespace(), &captured).await.unwrap();
@@ -1523,13 +1486,13 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::alongside(
-            &metadata_store,
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
             "scrub-test",
             ClaimMode::Atomic,
         ));
 
-        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
+        let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone(), 16);
 
         let mut executor: Box<dyn ActionSink> = Box::new(Executor::new(
             blob_store.clone(),

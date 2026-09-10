@@ -91,13 +91,12 @@ pub fn metadata_store(
         0
     };
 
-    let mut builder = MetadataStore::builder(store)
+    let builder = MetadataStore::builder(store)
         .link_cache_ttl(link_cache_ttl)
         .namespace_walk_concurrency(namespace_walk_concurrency)
         .gc_grace_secs(gc_grace_secs)
-        .atime_audit_window_secs(atime_audit_window_secs);
-
-    builder = builder.cache(auth_cache.clone());
+        .atime_audit_window_secs(atime_audit_window_secs)
+        .cache(auth_cache.clone());
 
     Ok(Arc::new(builder.build()))
 }
@@ -112,7 +111,7 @@ pub struct MaintenanceContext {
 /// Build the auth cache, blob backend, metadata store and repositories a
 /// maintenance command shares.
 pub async fn maintenance_context(config: &Configuration) -> Result<MaintenanceContext, Error> {
-    let auth_cache = auth_cache(&config.cache)?;
+    let auth_cache = config.cache.to_backend()?;
     let blob_store = Arc::new(
         config
             .blob_store
@@ -139,10 +138,6 @@ pub async fn maintenance_context(config: &Configuration) -> Result<MaintenanceCo
     })
 }
 
-pub fn auth_cache(config: &cache::Config) -> Result<Arc<Cache>, Error> {
-    config.to_backend().map_err(Error::from)
-}
-
 /// Registry over the shared stores, with webhooks from configuration and a
 /// caller-held job queue so no in-process drain loop is spawned.
 pub fn registry(
@@ -165,20 +160,6 @@ pub fn registry(
     Ok(registry)
 }
 
-pub async fn repository(
-    name: &str,
-    config: &repository::Config,
-    auth_cache: &Arc<Cache>,
-    max_manifest_size_bytes: usize,
-) -> Result<Repository, Error> {
-    Repository::new(name, config, auth_cache, max_manifest_size_bytes)
-        .await
-        .map_err(|source| Error::Repository {
-            name: name.to_string(),
-            source: Box::new(source),
-        })
-}
-
 pub async fn repositories(
     configs: &HashMap<String, repository::Config>,
     auth_cache: &Arc<Cache>,
@@ -186,10 +167,13 @@ pub async fn repositories(
 ) -> Result<Arc<RepositoryResolver>, Error> {
     let mut map = HashMap::with_capacity(configs.len());
     for (name, config) in configs {
-        map.insert(
-            name.clone(),
-            repository(name, config, auth_cache, max_manifest_size_bytes).await?,
-        );
+        let repository = Repository::new(name, config, auth_cache, max_manifest_size_bytes)
+            .await
+            .map_err(|source| Error::Repository {
+                name: name.clone(),
+                source: Box::new(source),
+            })?;
+        map.insert(name.clone(), repository);
     }
     let resolver = RepositoryResolver::new(Arc::new(map))?;
     Ok(Arc::new(resolver))
@@ -201,19 +185,12 @@ mod tests {
 
     use crate::{
         cache,
-        command::bootstrap::{self, Error, auth_cache, repositories},
+        command::bootstrap::{Error, repositories},
         command::maintenance::Error as MaintenanceError,
         command::server::Error as ServerError,
         policy::{AccessMode, AccessPolicyConfig},
         registry::{self, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES, repository},
     };
-
-    #[test]
-    fn auth_cache_memory_succeeds() {
-        let config = cache::Config::Memory;
-        let result = auth_cache(&config);
-        assert!(result.is_ok());
-    }
 
     #[tokio::test]
     async fn repository_with_default_config_succeeds() {
@@ -224,22 +201,17 @@ mod tests {
             }),
             ..repository::Config::default()
         };
-        let cache = auth_cache(&cache::Config::Memory).unwrap();
-        let result = bootstrap::repository(
-            "test-repo",
-            &repo_config,
-            &cache,
-            DEFAULT_MAX_MANIFEST_SIZE_BYTES,
-        )
-        .await;
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let configs = HashMap::from([("test-repo".to_string(), repo_config)]);
+        let result = repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().name, "test-repo");
+        assert!(result.unwrap().get("test-repo").is_some());
     }
 
     #[tokio::test]
     async fn repositories_empty_map_succeeds() {
         let configs = HashMap::new();
-        let cache = auth_cache(&cache::Config::Memory).unwrap();
+        let cache = cache::Config::Memory.to_backend().unwrap();
         let result = repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
@@ -268,7 +240,7 @@ mod tests {
                 ..repository::Config::default()
             },
         );
-        let cache = auth_cache(&cache::Config::Memory).unwrap();
+        let cache = cache::Config::Memory.to_backend().unwrap();
         let result = repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Overlap(_)));

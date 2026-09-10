@@ -54,7 +54,7 @@ impl Authenticator {
         let auth_config = &config.auth;
         reject_provider_name_collision(auth_config)?;
 
-        let mtls_validator = MtlsValidator::new();
+        let mtls_validator = MtlsValidator;
         let oidc_validators = Self::build_oidc_validators(auth_config, cache)?;
         let basic_auth_validator = BasicAuthValidator::new(&auth_config.identity)?;
 
@@ -647,7 +647,7 @@ mod tests {
         ));
         let cache = cache::Config::Memory.to_backend().unwrap();
         let authenticator = Authenticator {
-            mtls_validator: MtlsValidator::new(),
+            mtls_validator: MtlsValidator,
             token_validator: None,
             oidc_validators: Authenticator::build_oidc_validators(&config.auth, &cache).unwrap(),
             basic_auth_validator: BasicAuthValidator::new(&config.auth.identity).unwrap(),
@@ -896,7 +896,7 @@ mod tests {
             .collect();
 
         Authenticator {
-            mtls_validator: MtlsValidator::new(),
+            mtls_validator: MtlsValidator,
             token_validator: None,
             oidc_validators,
             basic_auth_validator: BasicAuthValidator::new(&HashMap::new()).unwrap(),
@@ -1256,7 +1256,7 @@ mod tests {
         }];
 
         let authenticator = Authenticator {
-            mtls_validator: MtlsValidator::new(),
+            mtls_validator: MtlsValidator,
             token_validator: None,
             oidc_validators,
             basic_auth_validator,

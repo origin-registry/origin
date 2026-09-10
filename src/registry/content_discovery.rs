@@ -301,28 +301,23 @@ impl Registry {
             }
         }
 
-        match self.blob_store.read(&manifest_digest).await {
-            Ok(data) => {
-                let manifest_len = data.len();
-                match Manifest::from_slice(&data) {
-                    Ok(mut manifest) => {
-                        if !manifest.artifact_type_matches(artifact_type) {
-                            return None;
-                        }
-                        Some(manifest.take_descriptor(manifest_digest, manifest_len as u64))
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse referrer manifest {manifest_digest}: {e}");
-                        None
-                    }
-                }
-            }
-            Err(Error::BlobUnknown) => {
-                warn!("Referrer manifest blob {manifest_digest} not found, skipping");
-                None
-            }
+        let data = match self.blob_store.read(&manifest_digest).await {
+            Ok(data) => data,
             Err(e) => {
                 warn!("Failed to read referrer manifest {manifest_digest}: {e}");
+                return None;
+            }
+        };
+        let manifest_len = data.len();
+        match Manifest::from_slice(&data) {
+            Ok(mut manifest) => {
+                if !manifest.artifact_type_matches(artifact_type) {
+                    return None;
+                }
+                Some(manifest.take_descriptor(manifest_digest, manifest_len as u64))
+            }
+            Err(e) => {
+                warn!("Failed to parse referrer manifest {manifest_digest}: {e}");
                 None
             }
         }

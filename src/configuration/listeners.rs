@@ -4,39 +4,22 @@ use std::{
     path::PathBuf,
 };
 
-use serde::{Deserialize, Deserializer};
-
-use crate::configuration::deserialize_positive_nonzero;
+use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ListenerBaseConfig {
     pub bind_address: IpAddr,
     #[serde(default = "ListenerBaseConfig::default_port")]
     pub port: u16,
-    #[serde(
-        default = "ListenerBaseConfig::default_query_timeout",
-        deserialize_with = "deserialize_query_timeout"
-    )]
+    #[serde(default = "ListenerBaseConfig::default_query_timeout")]
     pub query_timeout: NonZeroU64,
-    #[serde(
-        default = "ListenerBaseConfig::default_query_timeout_grace_period",
-        deserialize_with = "deserialize_query_timeout_grace_period"
-    )]
+    #[serde(default = "ListenerBaseConfig::default_query_timeout_grace_period")]
     pub query_timeout_grace_period: NonZeroU64,
     /// How long a client may take to complete its handshake before the
     /// connection is dropped. A TLS peer that opens a socket and then stalls
     /// otherwise holds a task until it disconnects.
-    #[serde(
-        default = "ListenerBaseConfig::default_handshake_timeout",
-        deserialize_with = "deserialize_handshake_timeout"
-    )]
+    #[serde(default = "ListenerBaseConfig::default_handshake_timeout")]
     pub handshake_timeout: NonZeroU64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct InsecureListenerConfig {
-    #[serde(flatten)]
-    pub base: ListenerBaseConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -107,20 +90,10 @@ impl ListenerBaseConfig {
         8000
     }
 
-    // Non-zero literals validated at compile time: the `None` arm can never be
-    // reached, so there is no runtime unwrap.
-    const DEFAULT_QUERY_TIMEOUT: NonZeroU64 = match NonZeroU64::new(3600) {
-        Some(value) => value,
-        None => panic!("default query timeout must be non-zero"),
-    };
-    const DEFAULT_QUERY_TIMEOUT_GRACE_PERIOD: NonZeroU64 = match NonZeroU64::new(60) {
-        Some(value) => value,
-        None => panic!("default query timeout grace period must be non-zero"),
-    };
-    const DEFAULT_HANDSHAKE_TIMEOUT: NonZeroU64 = match NonZeroU64::new(10) {
-        Some(value) => value,
-        None => panic!("default handshake timeout must be non-zero"),
-    };
+    // Non-zero literals; the `unwrap`s are const-evaluated.
+    const DEFAULT_QUERY_TIMEOUT: NonZeroU64 = NonZeroU64::new(3600).unwrap();
+    const DEFAULT_QUERY_TIMEOUT_GRACE_PERIOD: NonZeroU64 = NonZeroU64::new(60).unwrap();
+    const DEFAULT_HANDSHAKE_TIMEOUT: NonZeroU64 = NonZeroU64::new(10).unwrap();
 
     fn default_query_timeout() -> NonZeroU64 {
         Self::DEFAULT_QUERY_TIMEOUT
@@ -145,25 +118,4 @@ impl Default for ListenerBaseConfig {
             handshake_timeout: Self::default_handshake_timeout(),
         }
     }
-}
-
-fn deserialize_query_timeout<'de, D>(deserializer: D) -> Result<NonZeroU64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, u64, _>(deserializer, "query_timeout")
-}
-
-fn deserialize_query_timeout_grace_period<'de, D>(deserializer: D) -> Result<NonZeroU64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, u64, _>(deserializer, "query_timeout_grace_period")
-}
-
-fn deserialize_handshake_timeout<'de, D>(deserializer: D) -> Result<NonZeroU64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_positive_nonzero::<_, u64, _>(deserializer, "handshake_timeout")
 }

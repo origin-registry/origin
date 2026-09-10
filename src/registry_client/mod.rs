@@ -37,10 +37,7 @@ use angos_oci::{Content, Descriptor, Digest, Manifest, MediaRange, MediaType, Ta
 
 pub use crate::registry_client::{error::Error, write::UploadSession};
 use crate::{
-    cache::Cache,
-    http_client::apply_tls_files,
-    registry::{blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
-    secret::Secret,
+    cache::Cache, http_client::apply_tls_files, registry::blob_store::BoxedReader, secret::Secret,
 };
 use auth::token_index_cache_key;
 
@@ -230,19 +227,23 @@ impl RegistryClient {
         self.basic_auth.as_ref().map(|auth| auth.username.as_str())
     }
 
-    /// Starts building a registry client from individual resolved fields. The
-    /// base `url`, the pre-built HTTP `client` (carrying the resolved
-    /// TLS/redirect/timeout policy) and the shared token/auth `cache` are
-    /// required; `basic_auth` and `max_manifest_size_bytes` are optional fluent
-    /// setters on the returned builder.
+    /// A client over the base `url`: `client` carries the resolved
+    /// TLS/redirect/timeout policy and `cache` is the shared token/auth cache.
     #[must_use]
-    pub fn builder(url: String, client: Client, cache: Arc<Cache>) -> RegistryClientBuilder {
-        RegistryClientBuilder {
+    pub fn new(
+        url: String,
+        client: Client,
+        basic_auth: Option<BasicAuth>,
+        cache: Arc<Cache>,
+        max_manifest_size_bytes: usize,
+    ) -> Self {
+        Self {
             url,
             client,
-            basic_auth: None,
+            basic_auth,
             cache,
-            max_manifest_size_bytes: None,
+            token_refresh: Mutex::new(()),
+            max_manifest_size_bytes,
         }
     }
 
@@ -303,10 +304,13 @@ impl RegistryClient {
     ) -> Result<Self, Error> {
         let (client, basic_auth) = Self::resolve_config_fields(config)?;
 
-        Ok(Self::builder(config.url.clone(), client, cache)
-            .basic_auth(basic_auth)
-            .max_manifest_size_bytes(max_manifest_size_bytes)
-            .build())
+        Ok(Self::new(
+            config.url.clone(),
+            client,
+            basic_auth,
+            cache,
+            max_manifest_size_bytes,
+        ))
     }
 
     async fn query(
@@ -318,38 +322,22 @@ impl RegistryClient {
     ) -> Result<Response, Error> {
         debug!("Requesting from upstream: {}", without_query(location));
 
-        self.send_with_auth_retry(location, |auth| async move {
-            self.send(method, accepted_types, location, auth.as_deref(), range)
-                .await
-        })
-        .await
-    }
-
-    /// Shared cached-token-then-single-refresh-retry orchestration for
-    /// replayable-body requests ([`RegistryClient::query`] and
-    /// [`RegistryClient::send_body`]).
-    ///
-    /// `send_once` may run twice (cached header, then one refreshed token on
-    /// `401`), so it must clone any captured-by-value request state per attempt.
-    async fn send_with_auth_retry<F, Fut>(
-        &self,
-        location: &str,
-        send_once: F,
-    ) -> Result<Response, Error>
-    where
-        F: Fn(Option<String>) -> Fut,
-        Fut: Future<Output = Result<Response, Error>>,
-    {
         Ok(self
-            .send_with_auth_retry_capturing(location, send_once)
+            .send_with_auth_retry_capturing(location, |auth| async move {
+                self.send(method, accepted_types, location, auth.as_deref(), range)
+                    .await
+            })
             .await?
             .0)
     }
 
-    /// [`Self::send_with_auth_retry`] that also returns the auth header which
-    /// produced the final response. A streamed `PATCH` to a server-assigned
-    /// upload-session URL reuses it: that URL never issues its own auth
-    /// challenge, and a consumed stream cannot be replayed to refresh a token.
+    /// Cached-token-then-single-refresh-retry orchestration for replayable-body
+    /// requests, also returning the auth header which produced the final
+    /// response: a streamed `PATCH` to a server-assigned upload-session URL
+    /// reuses it, as that URL never issues its own challenge and a consumed
+    /// stream cannot be replayed to refresh a token. `send_once` may run twice
+    /// (cached header, then one refreshed token on `401`), so it must clone any
+    /// captured-by-value request state per attempt.
     async fn send_with_auth_retry_capturing<F, Fut>(
         &self,
         location: &str,
@@ -795,49 +783,5 @@ impl RegistryClient {
             digest,
             body: content,
         })
-    }
-}
-
-/// Builder for [`RegistryClient`] taking individual resolved fields.
-///
-/// `url`, `client` and `cache` are required and supplied to
-/// [`RegistryClient::builder`]; `basic_auth` defaults to none and
-/// `max_manifest_size_bytes` defaults to [`DEFAULT_MAX_MANIFEST_SIZE_BYTES`].
-pub struct RegistryClientBuilder {
-    url: String,
-    client: Client,
-    basic_auth: Option<BasicAuth>,
-    cache: Arc<Cache>,
-    max_manifest_size_bytes: Option<usize>,
-}
-
-impl RegistryClientBuilder {
-    /// Optional resolved basic-auth credentials (`username`, `password`).
-    #[must_use]
-    pub fn basic_auth(mut self, basic_auth: Option<BasicAuth>) -> Self {
-        self.basic_auth = basic_auth;
-        self
-    }
-
-    /// Maximum manifest body size accepted from the remote registry.
-    #[must_use]
-    pub fn max_manifest_size_bytes(mut self, max_manifest_size_bytes: usize) -> Self {
-        self.max_manifest_size_bytes = Some(max_manifest_size_bytes);
-        self
-    }
-
-    /// Builds the [`RegistryClient`].
-    #[must_use]
-    pub fn build(self) -> RegistryClient {
-        RegistryClient {
-            url: self.url,
-            client: self.client,
-            basic_auth: self.basic_auth,
-            cache: self.cache,
-            token_refresh: Mutex::new(()),
-            max_manifest_size_bytes: self
-                .max_manifest_size_bytes
-                .unwrap_or(DEFAULT_MAX_MANIFEST_SIZE_BYTES),
-        }
     }
 }

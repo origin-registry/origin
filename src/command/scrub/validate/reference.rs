@@ -5,7 +5,6 @@
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Namespace};
-use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
@@ -85,10 +84,14 @@ impl Validator {
         link: &LinkKind,
         blob: &Digest,
     ) -> Result<bool, Error> {
-        match self.metadata_store.object_store().head(key).await {
-            Ok(_) => {}
-            Err(StorageError::NotFound) => return Ok(false),
-            Err(e) => return Err(RegistryError::from(e).into()),
+        if !self
+            .metadata_store
+            .object_store()
+            .exists(key)
+            .await
+            .map_err(RegistryError::from)?
+        {
+            return Ok(false);
         }
         Ok(!self
             .metadata_store

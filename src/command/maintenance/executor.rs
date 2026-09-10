@@ -6,7 +6,7 @@ use chrono::Utc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_storage::Error as StorageError;
 use angos_storage::ObjectStore;
 
@@ -26,7 +26,7 @@ use crate::{
     jobs::{JobState, Queue},
     registry::{
         Error as RegistryError, Registry,
-        blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
+        blob_store::BlobStore,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
     },
     replication::{
@@ -376,8 +376,31 @@ impl Executor {
 
     /// Retention tag deletion through the registry's standard delete path, so
     /// it emits the delete events and, per its internal actor, mirrors only to
-    /// `prune = true` downstreams.
-    async fn delete_tag(&self, namespace: Namespace, tag: Tag) -> Result<(), Error> {
+    /// `prune = true` downstreams. A `target` is the digest the tag was judged
+    /// on, and the tag is left alone when it no longer points there.
+    async fn delete_tag(
+        &self,
+        namespace: Namespace,
+        tag: Tag,
+        target: Option<Digest>,
+    ) -> Result<(), Error> {
+        if let Some(target) = target {
+            // Uncached, like the digest-delete guard: a re-push landed on
+            // another replica within the link-cache TTL must be visible here,
+            // which is the whole point of re-reading.
+            let current = self
+                .metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+                .await?;
+            if current.target != target {
+                info!(
+                    "skipping tag deletion: '{namespace}:{tag}' now points at '{}', not the judged '{target}'",
+                    current.target
+                );
+                return Ok(());
+            }
+        }
+
         self.retention_registry()?
             .delete_manifest(
                 Some(EventActor::internal(RETENTION_ACTOR)),
@@ -420,20 +443,31 @@ impl Executor {
         }
     }
 
-    /// Reclaim an upload-only namespace whose name fails `Namespace` validation
-    /// by removing its upload subtree from the blob store.
-    async fn delete_invalid_upload_namespace(&self, name: String) -> Result<(), Error> {
-        self.blob_store.delete_namespace_directory(&name).await?;
-        Ok(())
-    }
-
     /// Retention orphan-manifest deletion through the registry's standard
     /// delete path, which also reclaims the manifest's bytes once unreferenced.
+    /// Age-gated like [`Self::delete_orphan_blob`]: every producer of this
+    /// action classifies a revision as orphaned the moment its record exists,
+    /// which is before the tag or index that will reference it lands.
     async fn delete_orphan_manifest(
         &self,
         namespace: Namespace,
         digest: Digest,
     ) -> Result<(), Error> {
+        // A multi-arch push writes its platform manifests by digest before the
+        // index that names them, and a single push has the same window between
+        // its record and its tag, so a fresh revision is still being pushed.
+        if self
+            .key_younger_than_grace(
+                self.metadata_store.object_store().as_ref(),
+                &namespace.revision_record_path(&digest),
+            )
+            .await?
+            .unwrap_or(false)
+        {
+            info!("skipping orphan manifest deletion: '{digest}' is younger than the grace period");
+            return Ok(());
+        }
+
         self.retention_registry()?
             .delete_manifest(
                 Some(EventActor::internal(RETENTION_ACTOR)),
@@ -441,17 +475,6 @@ impl Executor {
                 &namespace,
                 &Reference::Digest(digest),
             )
-            .await?;
-        Ok(())
-    }
-
-    async fn delete_expired_upload(
-        &self,
-        namespace: Namespace,
-        session_id: UploadSessionId,
-    ) -> Result<(), Error> {
-        self.blob_store
-            .delete_upload(&namespace, &session_id)
             .await?;
         Ok(())
     }
@@ -470,13 +493,6 @@ impl Executor {
                     referrer,
                 })],
             )
-            .await?;
-        Ok(())
-    }
-
-    async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
-        self.blob_store
-            .abort_orphan_multipart_upload(&upload)
             .await?;
         Ok(())
     }
@@ -558,10 +574,8 @@ impl Executor {
     ) -> Result<(), Error> {
         let store = self.metadata_store.object_store();
         let pending = job_pending_path(queue.as_str(), &storage_key);
-        match store.head(&pending).await {
-            Ok(_) => return Ok(()),
-            Err(StorageError::NotFound) => {}
-            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        if store.exists(&pending).await.map_err(RegistryError::from)? {
+            return Ok(());
         }
         match self.key_younger_than_grace(store.as_ref(), &key).await? {
             None => Ok(()),
@@ -643,22 +657,34 @@ impl ActionSink for Executor {
                 link,
                 target,
             } => self.recreate_link(namespace, link, target).await,
-            Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
+            Action::DeleteTag {
+                namespace,
+                tag,
+                target,
+            } => self.delete_tag(namespace, tag, target).await,
             Action::DemoteTagEntry {
                 namespace,
                 tag,
                 entry_name,
             } => self.demote_tag_entry(namespace, tag, entry_name).await,
-            Action::DeleteInvalidUploadNamespace { name } => {
-                self.delete_invalid_upload_namespace(name).await
-            }
+            // An upload-only namespace whose name fails `Namespace` validation
+            // is reclaimed by removing its upload subtree from the blob store.
+            Action::DeleteInvalidUploadNamespace { name } => self
+                .blob_store
+                .delete_namespace_directory(&name)
+                .await
+                .map_err(Error::from),
             Action::DeleteOrphanManifest { namespace, digest } => {
                 self.delete_orphan_manifest(namespace, digest).await
             }
             Action::DeleteExpiredUpload {
                 namespace,
                 session_id,
-            } => self.delete_expired_upload(namespace, session_id).await,
+            } => self
+                .blob_store
+                .delete_upload(&namespace, &session_id)
+                .await
+                .map_err(Error::from),
             Action::DeleteOrphanReferrer {
                 namespace,
                 subject,
@@ -667,7 +693,11 @@ impl ActionSink for Executor {
                 self.delete_orphan_referrer(namespace, subject, referrer)
                     .await
             }
-            Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
+            Action::AbortMultipartUpload { upload } => self
+                .blob_store
+                .abort_orphan_multipart_upload(&upload)
+                .await
+                .map_err(Error::from),
             Action::EnqueueReplicationPush {
                 downstream,
                 namespace,
@@ -710,10 +740,10 @@ impl ActionSink for Executor {
 mod tests {
     use std::str::FromStr;
 
-    use chrono::DateTime;
+    use chrono::{DateTime, TimeDelta};
     use tempfile::TempDir;
 
-    use angos_oci::Digest;
+    use angos_oci::{Digest, UploadSessionId};
     use angos_storage::fs::Backend as StorageFsBackend;
 
     use crate::command::maintenance::executor::*;
@@ -721,8 +751,8 @@ mod tests {
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         jobs::store::{ClaimMode, FailOutcome},
         registry::{
-            metadata_store::{LinkKind, LinkOperation},
-            test_utils::{for_each_backend, put_blob_direct},
+            metadata_store::{LinkKind, LinkOperation, MetadataStore, ReferencePolicy},
+            test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend, put_blob_direct},
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
@@ -1050,6 +1080,127 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// CI that re-pushes a tag between the retention snapshot and the delete
+    /// must not lose the image it just pushed, and a tag still pointing where
+    /// it was judged must still go.
+    #[tokio::test]
+    async fn executor_deletes_a_tag_only_while_it_points_where_it_was_judged() {
+        let case = FSRegistryTestCase::new();
+        let blob_store = case.blob_store();
+        let metadata_store = case.metadata_store();
+        let namespace = Namespace::new("test-repo/ci").unwrap();
+        let tag = Tag::new("latest").unwrap();
+
+        let judged = put_blob_direct(metadata_store.object_store(), b"what retention judged").await;
+        let repushed = put_blob_direct(metadata_store.object_store(), b"what CI just pushed").await;
+        // Both in the past, so the delete's own tombstone outranks them.
+        let pushed_at = Utc::now() - TimeDelta::seconds(10);
+        for (digest, at) in [
+            (&judged, pushed_at),
+            (&repushed, pushed_at + TimeDelta::seconds(1)),
+        ] {
+            metadata_store
+                .store_manifest(
+                    &namespace,
+                    &[LinkOperation::create(
+                        LinkKind::Tag(tag.clone()),
+                        digest.clone(),
+                    )],
+                    Some(at),
+                    ReferencePolicy::Trusted,
+                )
+                .await
+                .unwrap();
+        }
+
+        let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
+        executor
+            .apply(Action::DeleteTag {
+                namespace: namespace.clone(),
+                tag: tag.clone(),
+                target: Some(judged),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+                .await
+                .unwrap()
+                .target,
+            repushed,
+            "a tag re-pointed since it was judged must survive"
+        );
+
+        executor
+            .apply(Action::DeleteTag {
+                namespace: namespace.clone(),
+                tag: tag.clone(),
+                target: Some(repushed),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link_reference(&namespace, &LinkKind::Tag(tag))
+                .await
+                .is_err(),
+            "a tag still pointing where it was judged must be deleted"
+        );
+    }
+
+    /// Every producer of this action treats a revision as orphaned the moment
+    /// its record exists, which is before the index or tag that will reference
+    /// it lands. A multi-arch push writes its platform manifests first, so
+    /// without the gate retention deletes them mid-push.
+    #[tokio::test]
+    async fn executor_keeps_an_orphan_manifest_younger_than_the_grace() {
+        let case = FSRegistryTestCase::new();
+        let blob_store = case.blob_store();
+        let metadata_store = case.metadata_store();
+        let namespace = Namespace::new("test-repo/mid-push").unwrap();
+
+        let content = b"a platform manifest whose index has not landed yet";
+        let digest = put_blob_direct(metadata_store.object_store(), content).await;
+        metadata_store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest.clone(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        // The same store, read through a grace period the record cannot have
+        // outlived.
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let executor = Executor::new_for_test(blob_store.clone(), graced);
+
+        executor
+            .apply(Action::DeleteOrphanManifest {
+                namespace: namespace.clone(),
+                digest: digest.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(digest.clone()))
+                .await
+                .is_ok(),
+            "a revision younger than the grace is still being pushed and must survive"
+        );
     }
 
     #[tokio::test]
@@ -1414,7 +1565,8 @@ mod tests {
         let payload = CacheFetchBlobPayload {
             namespace: Namespace::new("ns/app").unwrap(),
             digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                .to_string(),
+                .parse()
+                .unwrap(),
         };
         JobEnvelope::new(
             Queue::Cache,

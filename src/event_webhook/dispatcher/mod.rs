@@ -12,7 +12,8 @@ use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use sha2::Sha256;
-use tokio::{sync::Mutex, task::JoinSet, time::sleep};
+use tokio::time::sleep;
+use tokio_util::task::TaskTracker;
 use tracing::warn;
 use url::Url;
 
@@ -33,7 +34,10 @@ use crate::{
 pub struct EventDispatcher {
     endpoints: HashMap<String, WebhookEndpoint>,
     shutdown: AtomicBool,
-    in_flight: Mutex<JoinSet<()>>,
+    /// Tracked rather than owned: a `JoinSet` aborts what it holds when it is
+    /// dropped, and a configuration reload drops the dispatcher it displaces,
+    /// which would cancel that dispatcher's deliveries mid-flight.
+    in_flight: TaskTracker,
     delivery_backoff: Backoff,
 }
 
@@ -224,10 +228,10 @@ impl EventDispatcher {
                 name,
                 WebhookEndpoint {
                     client,
+                    max_retries: config.max_retries(),
                     url: config.url,
                     policy: config.policy,
                     token: config.token,
-                    max_retries: config.max_retries,
                     events: config.events,
                     repository_filter: config.repository_filter,
                 },
@@ -237,7 +241,7 @@ impl EventDispatcher {
         Ok(Self {
             endpoints,
             shutdown: AtomicBool::new(false),
-            in_flight: Mutex::new(JoinSet::new()),
+            in_flight: TaskTracker::new(),
             delivery_backoff: Backoff::exponential(
                 Duration::from_millis(100),
                 Duration::from_secs(10),
@@ -264,11 +268,13 @@ impl EventDispatcher {
     }
 
     async fn drain_in_flight(&self) {
-        let mut in_flight = self.in_flight.lock().await;
-        while in_flight.join_next().await.is_some() {}
+        // Closing is what lets the wait return; the shutdown flag above is
+        // what stops another delivery being tracked after it.
+        self.in_flight.close();
+        self.in_flight.wait().await;
     }
 
-    async fn spawn_async(&self, delivery: Delivery) {
+    fn spawn_async(&self, delivery: Delivery) {
         if self.shutdown.load(Ordering::Acquire) {
             warn!(
                 "Async webhook '{}' skipped: dispatcher is shut down",
@@ -276,17 +282,13 @@ impl EventDispatcher {
             );
             return;
         }
-        let mut in_flight = self.in_flight.lock().await;
-        // Reap completed deliveries so the set does not grow for the life of
-        // the process.
-        while in_flight.try_join_next().is_some() {}
-        in_flight.spawn(delivery.deliver_logged());
+        self.in_flight.spawn(delivery.deliver_logged());
     }
 
     async fn deliver(&self, endpoint: &WebhookEndpoint, delivery: Delivery) -> Result<(), Error> {
         match endpoint.policy {
             DeliveryPolicy::Async => {
-                self.spawn_async(delivery).await;
+                self.spawn_async(delivery);
                 Ok(())
             }
             DeliveryPolicy::Required => match delivery.send_and_record().await {

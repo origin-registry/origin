@@ -277,22 +277,11 @@ async fn get_jwks_url(
 /// request. The cost is that a key rotation can take this long to be picked up.
 const JWKS_REFRESH_COOLDOWN_SECS: u64 = 60;
 
-/// The keys below name the issuer, not the config entry: two entries trusting
-/// one issuer describe the same signing keys, so they share the cached document
-/// rather than each fetching their own.
-fn jwks_refresh_cooldown_key(provider: &Config) -> String {
-    let issuer_hash = sha256_hex(&provider.issuer);
-    format!("oidc:jwks-refresh:{issuer_hash}")
-}
-
-fn jwks_cache_key(provider: &Config) -> String {
-    let issuer_hash = sha256_hex(&provider.issuer);
-    format!("oidc:jwks:{issuer_hash}")
-}
-
-fn oidc_configuration_cache_key(provider: &Config) -> String {
-    let issuer_hash = sha256_hex(&provider.issuer);
-    format!("oidc:config:{issuer_hash}")
+/// A cache key for one `kind` of document about the provider's issuer. The
+/// key names the issuer, not the config entry: two entries trusting one issuer
+/// describe the same signing keys, so they share the cached document.
+fn issuer_key(provider: &Config, kind: &str) -> String {
+    format!("oidc:{kind}:{}", sha256_hex(&provider.issuer))
 }
 
 async fn fetch_cached_json<T, F>(
@@ -390,7 +379,7 @@ async fn fetch_jwks(
     } else {
         provider.jwks_refresh_timeout_secs
     });
-    let cache_key = jwks_cache_key(provider);
+    let cache_key = issuer_key(provider, "jwks");
     let jwks_url = get_jwks_url(provider, client, cache, Some(timeout)).await?;
     let fetched = fetch_cached_json::<Jwks, _>(
         CachedJsonRequest {
@@ -423,7 +412,7 @@ async fn refresh_jwks_rate_limited(
     client: &Client,
     cache: &Cache,
 ) -> Result<Option<CachedJson<Jwks>>, Error> {
-    let cooldown_key = jwks_refresh_cooldown_key(provider);
+    let cooldown_key = issuer_key(provider, "jwks-refresh");
     if cache
         .retrieve_value(&cooldown_key)
         .await
@@ -460,7 +449,7 @@ async fn fetch_oidc_configuration_with_timeout(
     cache: &Cache,
     fetch_timeout: Option<Duration>,
 ) -> Result<OpenIdConfiguration, Error> {
-    let cache_key = oidc_configuration_cache_key(provider);
+    let cache_key = issuer_key(provider, "config");
     let config_url = format!("{}/.well-known/openid-configuration", provider.issuer);
     let fetched = fetch_cached_json::<OpenIdConfiguration, _>(
         CachedJsonRequest {

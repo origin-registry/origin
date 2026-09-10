@@ -41,7 +41,7 @@ use crate::{
         s3_connection::S3ConnectionConfig,
     },
     registry_client::RegistryClient,
-    replication::{ReplicationDownstream, ReplicationJob, ReplicationMode},
+    replication::{ReplicationDownstream, ReplicationJob},
     secret::Secret,
 };
 
@@ -133,8 +133,8 @@ pub fn metadata_store_over_cached(
 /// spawns the loops itself, which is the point: building a registry starts no
 /// background work.
 pub fn test_job_store(metadata_store: &MetadataStore) -> Arc<JobStore> {
-    Arc::new(JobStore::alongside(
-        metadata_store,
+    Arc::new(JobStore::new(
+        metadata_store.object_store().clone(),
         "test",
         ClaimMode::Atomic,
     ))
@@ -284,7 +284,7 @@ pub async fn get_blob(
     range: Option<RequestRange>,
 ) -> Result<Response<ResponseBody>, Error> {
     let has_access = registry
-        .blob_ownership()
+        .metadata_store()
         .can_read(namespace, digest)
         .await?;
     registry
@@ -545,11 +545,13 @@ impl RegistryTestCase for S3RegistryTestCase {
 /// pass a placeholder URI when the client is never dialed.
 pub fn downstream_client(uri: &str) -> Arc<RegistryClient> {
     let backend = cache::Config::Memory.to_backend().unwrap();
-    Arc::new(
-        RegistryClient::builder(uri.to_string(), reqwest::Client::new(), backend)
-            .max_manifest_size_bytes(DEFAULT_MAX_MANIFEST_SIZE_BYTES)
-            .build(),
-    )
+    Arc::new(RegistryClient::new(
+        uri.to_string(),
+        reqwest::Client::new(),
+        None,
+        backend,
+        DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+    ))
 }
 
 /// A test `Repository` named `name` carrying `replication` downstreams. The
@@ -578,12 +580,11 @@ pub fn repository_with_replication(
 pub fn repository_with_downstream(name: &str, client: Arc<RegistryClient>) -> Repository {
     repository_with_replication(
         name,
-        vec![
-            ReplicationDownstream::builder("eu-region".to_string(), client, 4)
-                .mode(ReplicationMode::EventReconcile)
-                .namespace_filter(Vec::new())
-                .build(),
-        ],
+        vec![ReplicationDownstream::new(
+            "eu-region".to_string(),
+            client,
+            4,
+        )],
     )
 }
 
