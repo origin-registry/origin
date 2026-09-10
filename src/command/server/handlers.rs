@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
     HeaderMap, Response, StatusCode,
-    header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
+    header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
 };
 use rust_embed::Embed;
 use serde::Serialize;
@@ -105,6 +105,10 @@ pub fn handle_ui_asset(path: &str) -> Result<Response<ResponseBody>, Error> {
 fn asset_response(mime: &str, data: Cow<'static, [u8]>) -> Result<Response<ResponseBody>, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::try_from(mime)?);
+    // The SPA fallback answers any unknown path with the session-bearing HTML,
+    // so pin its content type and forbid framing it.
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
     Ok(build_response(
         StatusCode::OK,
@@ -173,7 +177,7 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::asset_bytes;
+    use super::{asset_bytes, asset_response};
 
     /// The embedded (release) shape: every request must share the one `'static`
     /// copy rather than allocating its own, which pointer identity is the only
@@ -206,5 +210,19 @@ mod tests {
             address,
             "an asset read from disk must be handed over, not copied"
         );
+    }
+
+    /// The SPA HTML holds the registry session, so it must carry the sniffing
+    /// and framing guards on every asset response.
+    #[test]
+    fn asset_response_carries_security_headers() {
+        let response = asset_response(
+            "text/html; charset=utf-8",
+            Cow::Borrowed(b"<!doctype html>"),
+        )
+        .unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
+        assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
     }
 }
