@@ -43,4 +43,5 @@ FROM --platform=$TARGETPLATFORM scratch AS final
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /buildroot/target/angos /angos
 EXPOSE 8000
+USER 65534:65534
 ENTRYPOINT ["/angos"]

@@ -752,3 +752,30 @@ workflow that expected a `409` for a first push gets a `201`.
 
 None. To keep a tag unwritable altogether, deny the push at the authorization
 layer instead: `immutable_tags` protects content, not the namespace.
+
+## 1.7.x → 1.7.3
+
+### The Container Image Runs Unprivileged (Breaking Change)
+
+The image used to run `angos` as root. It now runs as UID and GID 65534, so
+every file the registry reads or writes must be accessible to that user: the
+data directory of a filesystem store, the TLS private key, and any client
+certificate files it is given.
+
+**Who is affected:** deployments that bind-mount a root-owned data directory
+into the container, or mount a private key readable only by root. The
+registry fails to start, or refuses every write, with a permission error.
+S3-backed deployments and manifests that already set `runAsUser` are
+unaffected.
+
+#### Migration
+
+Hand the data directory to the new user before starting the upgraded image:
+
+```bash
+sudo chown -R 65534:65534 /path/to/data
+```
+
+On Kubernetes, set `securityContext.fsGroup: 65534` on the pod so a mounted
+volume is writable, or keep an explicit `runAsUser` that owns the volume. A
+private key must be readable by UID 65534.

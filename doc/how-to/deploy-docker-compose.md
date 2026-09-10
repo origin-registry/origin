@@ -22,11 +22,13 @@ Deploy Angos using Docker Compose with persistent storage and TLS.
 
 ### Step 1: Create Configuration
 
-Create a directory for your deployment:
+Create a directory for your deployment. The image runs as UID 65534, so that
+user must own the data directory:
 
 ```bash
 mkdir -p registry/{config,data,certs}
 cd registry
+sudo chown 65534:65534 data
 ```
 
 Create `config/config.toml`:
@@ -90,6 +92,9 @@ openssl req -x509 -newkey rsa:4096 -keyout certs/server.key \
   -out certs/server.crt -days 365 -nodes \
   -subj "/CN=registry.example.com"
 ```
+
+The registry reads the key as UID 65534, so hand the file to that user rather
+than loosening its mode: `sudo chown 65534:65534 certs/server.key`.
 
 ### Step 2: Update Configuration
 
@@ -359,9 +364,9 @@ docker pull localhost:8000/library/nginx:latest
 docker compose logs registry
 ```
 
-**Permission denied on volumes:**
+**Permission denied on volumes:** the container runs as UID 65534.
 ```bash
-sudo chown -R 1000:1000 data/
+sudo chown -R 65534:65534 data/
 ```
 
 **TLS certificate errors:**
