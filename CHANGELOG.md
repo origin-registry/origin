@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The HTTP header-read timeout is now armed, so a client that dribbles request headers is dropped after 30 seconds instead of holding a connection for the whole `query_timeout`; an idle keep-alive is closed after the same 30 seconds.
 - A configuration reload now reaches an already-open keep-alive connection, so a revoked credential or a tightened policy applies to its next request instead of only after it closes.
 - A forwarded client IP is honored only when it parses as an address and is recorded in canonical form, and a proxy connecting over a dual-stack socket as an IPv4-mapped IPv6 address is now matched against IPv4 `trusted_proxies` entries.
+- The request scheme a trusted proxy forwards through `X-Forwarded-Proto` is resolved once, so the bearer-token realm and the authorization webhook no longer disagree about whether a request arrived over HTTPS.
 
 ## 1.7.2
 

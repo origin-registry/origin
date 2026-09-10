@@ -120,7 +120,13 @@ impl ServerContext {
             .and_then(|host| host.to_str().ok())
             .or_else(|| request.uri().authority().map(Authority::as_str))?;
 
-        Some((self.request_scheme(request), host.to_string()))
+        let scheme = request
+            .extensions()
+            .get::<RequestScheme>()
+            .copied()
+            .unwrap_or(RequestScheme::Http)
+            .as_str();
+        Some((scheme, host.to_string()))
     }
 
     /// The `WWW-Authenticate` challenge pointing clients at the token endpoint,
@@ -135,15 +141,17 @@ impl ServerContext {
 
     /// The scheme the client used, which behind a TLS-terminating proxy is not
     /// the scheme this server was reached on. Only a trusted peer's
-    /// `X-Forwarded-Proto` is believed.
-    fn request_scheme<B>(&self, request: &Request<B>) -> &'static str {
+    /// `X-Forwarded-Proto` is believed. Resolved once per request into the
+    /// `RequestScheme` extension, so the bearer realm and the auth webhook can
+    /// never disagree about the same request.
+    pub fn resolve_scheme<B>(&self, request: &Request<B>) -> RequestScheme {
         let peer = request.extensions().get::<SocketAddr>();
         if peer.is_some_and(|peer| self.is_trusted_proxy(peer.ip()))
             && let Some(proto) = request.headers().get("X-Forwarded-Proto")
             && let Ok(proto) = proto.to_str()
             && proto.trim().eq_ignore_ascii_case("https")
         {
-            return RequestScheme::Https.as_str();
+            return RequestScheme::Https;
         }
 
         request
@@ -151,7 +159,6 @@ impl ServerContext {
             .get::<RequestScheme>()
             .copied()
             .unwrap_or(RequestScheme::Http)
-            .as_str()
     }
 
     #[instrument(skip(self, parts))]

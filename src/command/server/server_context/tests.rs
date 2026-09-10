@@ -825,10 +825,12 @@ fn challenge_request(scheme: RequestScheme, headers: &[(&str, &str)]) -> Request
     request
 }
 
-/// The two halves the connection handler calls, one before dispatch and one on
-/// the denial path.
-fn challenge_for(context: &ServerContext, request: &Request<()>) -> Option<HeaderValue> {
-    let (scheme, host) = context.challenge_origin(request)?;
+/// The steps the connection handler runs: resolve the scheme into the
+/// extension, then derive the challenge from it on the denial path.
+fn challenge_for(context: &ServerContext, mut request: Request<()>) -> Option<HeaderValue> {
+    let scheme = context.resolve_scheme(&request);
+    request.extensions_mut().insert(scheme);
+    let (scheme, host) = context.challenge_origin(&request)?;
     context.bearer_challenge(scheme, &host)
 }
 
@@ -836,7 +838,7 @@ fn challenge_for(context: &ServerContext, request: &Request<()>) -> Option<Heade
 async fn no_bearer_challenge_without_a_token_service() {
     let context = create_test_server_context().await;
 
-    assert!(challenge_for(&context, &challenge_request(RequestScheme::Https, &[])).is_none());
+    assert!(challenge_for(&context, challenge_request(RequestScheme::Https, &[])).is_none());
 }
 
 #[tokio::test]
@@ -844,7 +846,7 @@ async fn the_bearer_challenge_falls_back_to_the_request_host() {
     let context = token_service_context("", "").await;
 
     assert_eq!(
-        challenge_for(&context, &challenge_request(RequestScheme::Https, &[])).unwrap(),
+        challenge_for(&context, challenge_request(RequestScheme::Https, &[])).unwrap(),
         r#"Bearer realm="https://registry.example.com/token",service="registry.example.com""#
     );
 }
@@ -854,7 +856,7 @@ async fn a_configured_realm_wins_over_the_request_host() {
     let context = token_service_context("", r#"realm = "https://public.example.com/token""#).await;
 
     assert_eq!(
-        challenge_for(&context, &challenge_request(RequestScheme::Https, &[])).unwrap(),
+        challenge_for(&context, challenge_request(RequestScheme::Https, &[])).unwrap(),
         r#"Bearer realm="https://public.example.com/token",service="public.example.com""#
     );
 }
@@ -868,7 +870,7 @@ async fn a_trusted_proxy_decides_the_realm_scheme() {
     assert_eq!(
         challenge_for(
             &context,
-            &challenge_request(RequestScheme::Http, &[("X-Forwarded-Proto", "https")])
+            challenge_request(RequestScheme::Http, &[("X-Forwarded-Proto", "https")])
         )
         .unwrap(),
         r#"Bearer realm="https://registry.example.com/token",service="registry.example.com""#
@@ -882,7 +884,7 @@ async fn an_untrusted_peer_cannot_change_the_realm_scheme() {
     assert_eq!(
         challenge_for(
             &context,
-            &challenge_request(RequestScheme::Http, &[("X-Forwarded-Proto", "https")])
+            challenge_request(RequestScheme::Http, &[("X-Forwarded-Proto", "https")])
         )
         .unwrap(),
         r#"Bearer realm="http://registry.example.com/token",service="registry.example.com""#

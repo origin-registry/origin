@@ -147,7 +147,7 @@ mod tests {
     use angos_oci::{Namespace, Reference, Tag};
 
     use crate::auth::webhook::headers::{build_cache_key, build_headers};
-    use crate::identity::{Action, ClientIdentity, OidcClaims};
+    use crate::identity::{Action, ClientIdentity, OidcClaims, RequestScheme};
 
     fn anonymous() -> ClientIdentity {
         ClientIdentity::new(None)
@@ -201,6 +201,16 @@ mod tests {
             namespace: Namespace::new("library/nginx").unwrap(),
             reference: Reference::Tag(Tag::new(tag).unwrap()),
         }
+    }
+
+    #[test]
+    fn x_forwarded_proto_follows_the_resolved_scheme_extension() {
+        // The connection handler resolves a trusted proxy's scheme into the
+        // extension; the webhook must forward that, not the listener's raw one.
+        let mut parts = parts_with_headers(&[]);
+        parts.extensions.insert(RequestScheme::Https);
+        let headers = build_headers(&[], &get_manifest("v1"), &anonymous(), &parts).unwrap();
+        assert_eq!(headers.get("X-Forwarded-Proto").unwrap(), "https");
     }
 
     #[test]

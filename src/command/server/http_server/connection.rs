@@ -118,11 +118,17 @@ pub async fn serve_request<S>(
 #[instrument(skip(context, request))]
 async fn handle_request(
     context: Arc<ServerContext>,
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
+
+    // Resolve the client's scheme once, honouring a trusted proxy's
+    // `X-Forwarded-Proto`, and overwrite the listener's raw scheme. The bearer
+    // realm and the auth webhook both read this one extension.
+    let scheme = context.resolve_scheme(&request);
+    request.extensions_mut().insert(scheme);
     let mut action = router::parse(request.method(), request.uri());
     // A mirroring client names the registry it believes it is addressing in
     // `?ns=`; serving it from the repository mirroring that namespace is what
