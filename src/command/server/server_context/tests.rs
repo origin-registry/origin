@@ -673,6 +673,28 @@ fn test_resolve_forwarded_ip_missing_header() {
 }
 
 #[test]
+fn test_resolve_forwarded_ip_rejects_non_ip_entry() {
+    // A forged non-IP entry must not become the client IP; it breaks the
+    // chain rather than passing through verbatim.
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Forwarded-For", "not-an-ip, 10.0.0.1".parse().unwrap());
+    assert_eq!(
+        resolve_forwarded_ip(&headers, &proxies(&["10.0.0.0/8"])),
+        None
+    );
+}
+
+#[test]
+fn test_resolve_forwarded_ip_canonicalises_mapped_ipv4() {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Forwarded-For", "::ffff:192.168.1.100".parse().unwrap());
+    assert_eq!(
+        resolve_forwarded_ip(&headers, &[]),
+        Some("192.168.1.100".to_string())
+    );
+}
+
+#[test]
 fn test_resolve_forwarded_ip_x_real_ip_fallback() {
     let mut headers = HeaderMap::new();
     headers.insert("X-Real-IP", "192.168.1.200".parse().unwrap());

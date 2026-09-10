@@ -182,9 +182,14 @@ pub async fn accept_loop<C: Connector + 'static>(
             accepted = listener.accept() => accepted,
         };
         let (tcp, remote_address) = match accepted {
-            Ok(accepted) => {
+            Ok((tcp, remote_address)) => {
                 consecutive_failures = 0;
-                accepted
+                // A dual-stack bind reports an IPv4 peer as `::ffff:a.b.c.d`,
+                // which matches no IPv4 `trusted_proxies` entry and reads wrong
+                // in the audit log; canonicalise once so every consumer sees
+                // the dotted form.
+                let ip = remote_address.ip().to_canonical();
+                (tcp, SocketAddr::new(ip, remote_address.port()))
             }
             // A client gone between the SYN and the accept costs only its own
             // connection, so the next one is taken immediately.

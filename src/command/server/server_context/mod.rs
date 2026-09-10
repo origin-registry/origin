@@ -208,7 +208,9 @@ impl ServerContext {
 /// Resolves the client IP forwarded by a trusted proxy: the rightmost
 /// `X-Forwarded-For` entry that is not itself a trusted proxy, else
 /// `X-Real-IP`. Only proxies append entries on the right; anything further
-/// left is client-supplied and must not be trusted.
+/// left is client-supplied and must not be trusted. Each candidate must parse
+/// as an address, so a forged non-IP entry cannot reach the identity, and the
+/// result is canonical, so a mapped IPv4 reads as its dotted form.
 fn resolve_forwarded_ip(headers: &HeaderMap, proxies: &[TrustedProxy]) -> Option<String> {
     if let Some(forwarded_for) = headers.get("X-Forwarded-For")
         && let Ok(forwarded_str) = forwarded_for.to_str()
@@ -218,18 +220,21 @@ fn resolve_forwarded_ip(headers: &HeaderMap, proxies: &[TrustedProxy]) -> Option
             if entry.is_empty() {
                 continue;
             }
-            let is_proxy = entry
-                .parse::<IpAddr>()
-                .is_ok_and(|ip| proxies.iter().any(|p| p.contains(ip)));
-            if !is_proxy {
-                return Some(entry.to_string());
+            // A malformed entry breaks the chain: refuse to walk past it into
+            // the client-supplied entries further left.
+            let Ok(ip) = entry.parse::<IpAddr>() else {
+                break;
+            };
+            if !proxies.iter().any(|p| p.contains(ip)) {
+                return Some(ip.to_canonical().to_string());
             }
         }
     }
     if let Some(real_ip) = headers.get("X-Real-IP")
         && let Ok(ip_str) = real_ip.to_str()
+        && let Ok(ip) = ip_str.trim().parse::<IpAddr>()
     {
-        return Some(ip_str.trim().to_string());
+        return Some(ip.to_canonical().to_string());
     }
     None
 }

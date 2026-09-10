@@ -121,7 +121,7 @@ listener.
 | `namespace_walk_concurrency`| usize    | `128`    | Concurrent directory scans a catalog / upload-namespace walk keeps in flight, hiding per-request backend latency on S3. |
 | `gc_grace_secs`             | u64      | `300`    | Reclamation grace period, used by the serving process and scrub alike: young keys read as live, the push path re-checks the collector after this long, and gc run markers derive their TTL from it. Lower it only in a maintenance config for offline runs against a store with no live traffic; the serving processes must keep a value that exceeds clock skew plus the longest write stall. |
 | `atime_audit_window_secs`   | u64      | `3600`   | How long superseded access entries are retained as pull history, which the admin pull-history endpoint serves and scrub collects past. Raising it grows the number of keys under `!atime/` in proportion to pull volume. |
-| `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. |
+| `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. The set must name proxies only: a range that also covers clients lets them spoof the forwarded header. |
 
 `max_manifest_size`, `max_blob_size` and `blob_stream_frame_size` must be greater than zero.
 
