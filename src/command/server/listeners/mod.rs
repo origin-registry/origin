@@ -95,7 +95,7 @@ pub trait Connector: Send + Sync {
 pub struct Listener<C: Connector> {
     binding_address: SocketAddr,
     connector: Arc<C>,
-    context: ArcSwap<ServerContext>,
+    context: Arc<ArcSwap<ServerContext>>,
     timeouts: ArcSwap<RequestTimeouts>,
     connections: Connections,
 }
@@ -107,7 +107,7 @@ impl<C: Connector + 'static> Listener<C> {
         Self {
             binding_address: SocketAddr::new(base.bind_address, base.port),
             connector: Arc::new(connector),
-            context: ArcSwap::from_pointee(context),
+            context: Arc::new(ArcSwap::from_pointee(context)),
             timeouts: ArcSwap::from_pointee(RequestTimeouts::from_config(base)),
             connections: Connections::default(),
         }
@@ -157,7 +157,7 @@ impl<C: Connector + 'static> Listener<C> {
 pub async fn accept_loop<C: Connector + 'static>(
     listener: TcpListener,
     connector: &Arc<C>,
-    context: &ArcSwap<ServerContext>,
+    context: &Arc<ArcSwap<ServerContext>>,
     timeouts: &ArcSwap<RequestTimeouts>,
     connections: &Connections,
 ) -> Result<(), Error> {
@@ -200,7 +200,9 @@ pub async fn accept_loop<C: Connector + 'static>(
         };
 
         let connector = Arc::clone(connector);
-        let context = Arc::clone(&context.load());
+        // The swap handle, not a snapshot: a config reload swaps the context
+        // and every later request on this open keep-alive loads the new one.
+        let context = Arc::clone(context);
         let timeouts = Arc::clone(&timeouts.load());
         let shutdown = connections.shutdown.clone();
 
@@ -322,7 +324,7 @@ mod tests {
         let connector = Arc::new(StalledConnector {
             started: Arc::clone(&started),
         });
-        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let context = Arc::new(ArcSwap::from_pointee(create_test_server_context().await));
         let timeouts =
             ArcSwap::from_pointee(RequestTimeouts::from_config(&ListenerBaseConfig::default()));
         let connections = Connections::default();
@@ -374,7 +376,7 @@ mod tests {
         let connector = Arc::new(StalledConnector {
             started: Arc::clone(&started),
         });
-        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let context = Arc::new(ArcSwap::from_pointee(create_test_server_context().await));
         let timeouts =
             ArcSwap::from_pointee(RequestTimeouts::from_config(&ListenerBaseConfig::default()));
 
@@ -417,7 +419,7 @@ mod tests {
         let connector = Arc::new(StalledConnector {
             started: Arc::clone(&started),
         });
-        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let context = Arc::new(ArcSwap::from_pointee(create_test_server_context().await));
         let timeouts = ArcSwap::from_pointee(RequestTimeouts {
             handshake: Duration::from_millis(20),
             query: Duration::from_secs(1),

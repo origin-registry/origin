@@ -3,6 +3,7 @@ use std::{
     time::Instant,
 };
 
+use arc_swap::ArcSwap;
 use hyper::{
     Method, Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
     service::service_fn,
@@ -45,7 +46,7 @@ type DispatchFuture =
 /// they only stop the keepalive from taking another request.
 pub async fn serve_request<S>(
     stream: TokioIo<S>,
-    context: Arc<ServerContext>,
+    context: Arc<ArcSwap<ServerContext>>,
     peer_certificate: Option<Vec<u8>>,
     timeouts: Arc<RequestTimeouts>,
     remote_address: SocketAddr,
@@ -66,7 +67,7 @@ pub async fn serve_request<S>(
                 inject_peer_certificate(&mut request, peer_certificate.as_deref());
                 request.extensions_mut().insert(remote_address);
                 request.extensions_mut().insert(scheme);
-                handle_request(Arc::clone(&context), request)
+                handle_request(context.load_full(), request)
             }),
         );
     pin!(conn);
