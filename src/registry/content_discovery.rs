@@ -42,21 +42,26 @@ const REFERRER_RESOLVE_CONCURRENCY: usize = 10;
 pub const DEFAULT_PAGE_SIZE: u16 = 100;
 
 impl Registry {
-    /// One page of namespaces, advertising the next through the `Link` header
-    /// while the listing is not exhausted.
+    /// One page of namespaces the caller may list, advertising the next through
+    /// the `Link` header while the listing is not exhausted. `keep` drops the
+    /// entries the caller's access policy hides.
     pub async fn list_catalog_entries(
         &self,
         request: ListCatalogRequest,
+        keep: impl Fn(&Namespace) -> bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let n = request.n.unwrap_or(DEFAULT_PAGE_SIZE);
         let page = self.metadata_store.list_namespaces(n, request.last).await?;
+        // The `Link` cursor tracks the raw page, so a page filtered below `n`
+        // (or to empty) while entries remain still advances; the client follows
+        // `Link` until it is absent.
         let link = page
             .next_token
             .as_ref()
             .map(|last| format!("/v2/_catalog?n={n}&last={last}"));
 
         let body = CatalogResponse {
-            repositories: page.items,
+            repositories: page.items.into_iter().filter(|ns| keep(ns)).collect(),
         };
 
         Ok(build_response(
@@ -417,10 +422,13 @@ mod tests {
         for_each_backend(async |test_case| {
             let response = test_case
                 .registry()
-                .list_catalog_entries(ListCatalogRequest {
-                    n: None,
-                    last: None,
-                })
+                .list_catalog_entries(
+                    ListCatalogRequest {
+                        n: None,
+                        last: None,
+                    },
+                    |_| true,
+                )
                 .await
                 .expect("an empty registry must serve a catalog, not a miss");
 
@@ -539,7 +547,7 @@ mod tests {
 
         loop {
             let response = registry
-                .list_catalog_entries(ListCatalogRequest { n: Some(2), last })
+                .list_catalog_entries(ListCatalogRequest { n: Some(2), last }, |_| true)
                 .await
                 .unwrap();
             let cursor = next_cursor(&response);

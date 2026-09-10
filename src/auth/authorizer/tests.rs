@@ -226,6 +226,46 @@ async fn has_repository_policy_hands_the_decision_to_the_repository() {
     }
 }
 
+/// The catalog hides a repository whose per-repository policy denies the
+/// caller, and shows one it allows; the global policy alone gates the rest.
+#[tokio::test]
+async fn catalog_filtering_honours_the_repository_policy() {
+    let config = load_config(
+        r#"
+            [global.access_policy]
+            default = "deny"
+            rules = ["request.action == 'list-tags'"]
+
+            [repository.guarded.access_policy]
+            default = "deny"
+            rules = ["identity.username == 'alice'"]
+
+            [repository.unguarded]
+        "#,
+    );
+    let (authorizer, registry) = authorizer_and_registry(&config).await;
+    let identity = |name: &str| ClientIdentity {
+        username: Some(name.to_string()),
+        ..ClientIdentity::new(None)
+    };
+    let listable = |ns: &str, name: &str| {
+        authorizer.allows_catalog_entry(&Namespace::new(ns).unwrap(), &identity(name), &registry)
+    };
+
+    assert!(
+        listable("guarded/app", "alice"),
+        "the repository policy admits alice"
+    );
+    assert!(
+        !listable("guarded/app", "bob"),
+        "the repository policy hides the entry from bob"
+    );
+    assert!(
+        listable("unguarded/app", "bob"),
+        "a repository declaring no policy falls to the global list-tags rule"
+    );
+}
+
 fn create_pull_through_config() -> Configuration {
     load_config(
         r#"

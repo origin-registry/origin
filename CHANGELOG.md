@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The embedded web UI is served with `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`, so the session-bearing HTML cannot be sniffed or framed.
 - A CEL policy rule that errors on evaluated identity or request data no longer copies that value into the log or the denial reason; only the failing operator or method is recorded.
 - The `/readyz` probe answers a failing backend with `storage backend not ready` and logs the cause, rather than returning the storage error, which named the bucket and endpoint, to an anonymous caller.
+- `/v2/_catalog` now hides a repository the caller may not list: each entry is filtered by the global and the covering repository's access policy, per page. Callers must follow the `Link` header, since a filtered page may hold fewer than `n` names.
 
 ## 1.7.2
 

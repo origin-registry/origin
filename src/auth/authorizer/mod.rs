@@ -175,6 +175,48 @@ impl Authorizer {
         Ok(())
     }
 
+    /// Whether `identity` may see `namespace` in the catalog listing under the
+    /// access policies: the global policy, then the covering repository's when
+    /// it declares one. The webhook is deliberately not consulted, since one
+    /// call per entry per page would be prohibitive, and hiding a repository is
+    /// a policy-visibility concern rather than a per-request authorization.
+    #[must_use]
+    pub fn allows_catalog_entry(
+        &self,
+        namespace: &Namespace,
+        identity: &ClientIdentity,
+        registry: &Registry,
+    ) -> bool {
+        let repository = registry.get_repository_for_namespace(namespace).ok();
+        // A repository is listable when the client could list its tags: the
+        // catalog is a listing, so it gates on the same read.
+        let action = Action::ListTags {
+            namespace: namespace.clone(),
+            n: None,
+            last: None,
+        };
+        let global = self.global_access_policy.evaluate(
+            &action,
+            identity,
+            self.has_repository_policy(repository),
+        );
+        if !matches!(global, PolicyDecision::Allow) {
+            return false;
+        }
+        let Some(repository) = repository else {
+            return true;
+        };
+        match self.repositories.get(repository.name.as_ref()) {
+            Some(auth_repo) => auth_repo.access_policy.as_ref().is_none_or(|policy| {
+                matches!(
+                    policy.evaluate(&action, identity, true),
+                    PolicyDecision::Allow
+                )
+            }),
+            None => true,
+        }
+    }
+
     /// Whether the `[repository]` covering the request carries its own access
     /// policy, so that policy decides it after the global one. Global rules read
     /// it as `has_repository_policy()` to hand the decision over instead of

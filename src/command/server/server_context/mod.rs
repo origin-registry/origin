@@ -193,6 +193,18 @@ impl ServerContext {
             .await?)
     }
 
+    /// Whether `identity` may see `namespace` in the catalog listing, under the
+    /// access policies alone.
+    #[must_use]
+    pub fn catalog_lists_namespace(
+        &self,
+        namespace: &Namespace,
+        identity: &ClientIdentity,
+    ) -> bool {
+        self.authorizer
+            .allows_catalog_entry(namespace, identity, &self.registry)
+    }
+
     /// Resolves a source namespace whose copy of the mount's blob `identity` can
     /// already read; `None` means fall back to an ordinary upload session.
     pub async fn authorize_mount_source(

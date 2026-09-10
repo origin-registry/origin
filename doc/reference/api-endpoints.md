@@ -242,6 +242,8 @@ Query parameters:
 
 The returned names are derived directly from stored content: a namespace is listed exactly when it holds at least one revision or tag, and stops being listed as soon as the last one is deleted.
 
+The listing is filtered by access policy: a namespace is included only when the caller could list its tags under the global policy and the covering repository's policy, so a repository a caller cannot read is hidden from its catalog. Filtering runs per page, so a page may return fewer than `n` names while more remain; follow the `Link` header until it is absent. The authorization webhook is not consulted for this filtering.
+
 ### Referrers
 
 ```
