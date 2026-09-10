@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - An upload whose earlier chunk wrote bytes it never checkpointed is now failed closed when the next chunk lands, instead of promoting a blob longer than its digest covers.
+- The HTTP header-read timeout is now armed, so a client that dribbles request headers is dropped after 30 seconds instead of holding a connection for the whole `query_timeout`; an idle keep-alive is closed after the same 30 seconds.
 
 ## 1.7.2
 

@@ -7,7 +7,7 @@ use hyper::{
     Method, Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
     service::service_fn,
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use opentelemetry::trace::TraceContextExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -54,15 +54,21 @@ pub async fn serve_request<S>(
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
-    let conn = http1::Builder::new().serve_connection(
-        stream,
-        service_fn(move |mut request| {
-            inject_peer_certificate(&mut request, peer_certificate.as_deref());
-            request.extensions_mut().insert(remote_address);
-            request.extensions_mut().insert(scheme);
-            handle_request(Arc::clone(&context), request)
-        }),
-    );
+    // A timer arms hyper's 30-second `header_read_timeout`, which is inert with
+    // no timer installed: a client dribbling one header byte at a time would
+    // otherwise hold the connection for the whole `query_timeout`. It also
+    // closes an idle keep-alive after the same 30 seconds.
+    let conn = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .serve_connection(
+            stream,
+            service_fn(move |mut request| {
+                inject_peer_certificate(&mut request, peer_certificate.as_deref());
+                request.extensions_mut().insert(remote_address);
+                request.extensions_mut().insert(scheme);
+                handle_request(Arc::clone(&context), request)
+            }),
+        );
     pin!(conn);
 
     let _in_flight_guard = InFlightGuard::new();
