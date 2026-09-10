@@ -193,11 +193,18 @@ impl RegistryClient {
                 Error::Internal("upstream response is missing Location header".into())
             })?;
 
-        response
-            .url()
+        let base = response.url();
+        let joined = base
             .join(location)
-            .map(|url| url.to_string())
-            .map_err(|e| Error::Internal(format!("invalid Location header '{location}': {e}")))
+            .map_err(|e| Error::Internal(format!("invalid Location header '{location}': {e}")))?;
+        // Following a cross-origin Location would carry the session's auth to
+        // a host the registry named, so a hostile upstream could harvest it.
+        if joined.origin() != base.origin() {
+            return Err(Error::Denied(format!(
+                "upstream Location '{joined}' points to a different origin than {base}"
+            )));
+        }
+        Ok(joined.to_string())
     }
 
     /// Starts a resumable blob upload session, returning the server-assigned
