@@ -779,3 +779,21 @@ sudo chown -R 65534:65534 /path/to/data
 On Kubernetes, set `securityContext.fsGroup: 65534` on the pod so a mounted
 volume is writable, or keep an explicit `runAsUser` that owns the volume. A
 private key must be readable by UID 65534.
+
+### A Referrer No Longer Pins Its Subject (Breaking Change)
+
+`prune` used to keep any manifest carrying a referrer, so a signature, an SBOM
+or a scan report held its image out of retention for as long as the referrer
+itself survived, while the referrer was judged as untagged content of its own.
+Retention now judges the image by the rules alone, skips its referrers while
+it resolves, and reclaims them with it in the same run.
+
+**Who is affected:** deployments relying on a signature or an attestation to
+keep an untagged image out of retention. Such an image is deleted on the next
+`prune` once no rule retains it.
+
+#### Migration
+
+Run `angos prune --dry-run` before the first run on the new version, and add
+a rule retaining the images that were kept only by their referrers, such as an
+age rule or a tag naming them.

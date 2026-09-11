@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** a referrer such as a signature, an SBOM or a scan report no longer pins its subject against retention and is no longer judged as untagged content of its own: `angos prune` skips it while its subject resolves and reclaims it with the subject in the same run.
 - The container image runs as UID 65534 instead of root, so a bind-mounted data directory must be owned by that user and a mounted private key readable by it; see the upgrade guide.
 
 ### Fixed

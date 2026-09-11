@@ -264,9 +264,9 @@ Cleared namespaces drop out of `_catalog` automatically, since the catalog is de
 
 ### Protected Items
 
-Never deleted by `prune`:
-- Child manifests of multi-platform indexes
-- Manifests with referrers (signatures, SBOMs)
+Skipped by retention while their parent resolves, and reclaimed with it:
+- Child manifests of a multi-platform index
+- Referrers (signatures, SBOMs, scan reports) of a subject
 
 This scope is retention only. Orphan-namespace clearing removes the entire orphan namespace, including index children and referrer/signature manifests.
 

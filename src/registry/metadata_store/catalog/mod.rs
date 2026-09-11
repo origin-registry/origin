@@ -471,16 +471,6 @@ impl MetadataStore {
         Ok(!self.collect_live_tags(namespace, 1, None).await?.is_empty())
     }
 
-    pub async fn has_referrers(
-        &self,
-        namespace: &Namespace,
-        subject: &Digest,
-    ) -> Result<bool, Error> {
-        let dir = namespace.referrer_record_dir(subject);
-        let page = self.object_store().list(&dir, 1, None).await?;
-        Ok(!page.items.is_empty())
-    }
-
     /// Streams every manifest revision digest in `namespace`, from its
     /// revision records.
     pub fn stream_revisions<'a>(
