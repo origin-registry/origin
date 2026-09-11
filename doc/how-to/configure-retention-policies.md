@@ -25,7 +25,7 @@ sequenceDiagram
 
     S->>M: Evaluate manifest
     M->>M: Check protection status
-    alt Index child OR Has referrers
+    alt Index child OR Referrer of a live subject
         M-->>S: KEEP (protected)
     else Not protected
         M->>R: Evaluate rules
@@ -37,9 +37,11 @@ sequenceDiagram
     end
 ```
 
-**Protected manifests** are never deleted:
-- Child manifests of multi-platform indexes
-- Manifests with referrers (signatures, SBOMs)
+**Protected manifests** are pinned by a parent and reclaimed with it rather than judged on their own:
+- Child manifests of a multi-platform index, while the index resolves
+- Referrers (signatures, SBOMs, scan reports) of a subject, while the subject resolves
+
+An image is judged by the rules whatever refers to it. Once it is deleted, its referrers have no subject left and are judged as untagged content in the same run.
 
 **Retention subjects** are tagged manifests, untagged (orphan) manifests, and grant-only blobs. A grant-only blob is one a namespace uploaded whose manifest never landed (a lost replication race, a dead-lettered push, or an abandoned client); it is evaluated like any untagged content, with no tag and `pushed_at` set to the upload time, once it is past prune's `-u` in-flight window. A time-based rule such as `image.pushed_at > now() - days(7)` therefore also bounds how long stranded uploads linger. With no policies configured, untagged manifests and grant-only blobs are both retained.
 
@@ -317,7 +319,7 @@ Fix the offending rule and re-run `prune --dry-run` to verify the corrected beha
 
 **Images not being deleted:**
 - Check if they match any retention rule
-- Check if they're protected (index child or has referrers)
+- Check if they're protected (index child or referrer of a live subject)
 - Verify `prune` command is running
 
 **Pull time not tracked:**

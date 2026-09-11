@@ -537,10 +537,17 @@ impl RetentionChecker {
             Fate::Skip | Fate::Retain => Ok(Vec::new()),
             Fate::Delete => {
                 // Read before the delete reclaims the body naming them.
-                let unpinned = match read_manifest(&self.blob_store, digest).await? {
+                let mut unpinned = match read_manifest(&self.blob_store, digest).await? {
                     Some(manifest) => link_plan::unpinned_by_delete(&manifest),
                     None => Vec::new(),
                 };
+                // Its referrers lose their subject and are judged in this run.
+                let referrers: Vec<Digest> = self
+                    .metadata_store
+                    .stream_referrer_digests(namespace, digest)
+                    .try_collect()
+                    .await?;
+                unpinned.extend(referrers);
                 sink.apply(Action::DeleteOrphanManifest {
                     namespace: namespace.clone(),
                     digest: digest.clone(),
@@ -551,6 +558,9 @@ impl RetentionChecker {
         }
     }
 
+    /// Pinned by a parent, so reclaimed with it rather than judged on its own:
+    /// an index child while the index resolves, or a referrer while its
+    /// subject does.
     async fn is_protected(
         &self,
         namespace: &Namespace,
@@ -566,7 +576,26 @@ impl RetentionChecker {
             return Ok(true);
         }
 
-        Ok(self.metadata_store.has_referrers(namespace, digest).await?)
+        let Some(links) = blob_index.and_then(|index| index.namespace.get(namespace)) else {
+            return Ok(false);
+        };
+        for link in links {
+            let LinkKind::Referrer { subject, .. } = link else {
+                continue;
+            };
+            // Bypasses the link cache like `reference_backed`, so a subject
+            // deleted elsewhere cannot keep its referrers skipped.
+            match self
+                .metadata_store
+                .read_link_reference(namespace, &LinkKind::Digest(subject.clone()))
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(RegistryError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(false)
     }
 
     /// Any index entry matching `predicate` whose backing link still resolves.
@@ -1146,6 +1175,205 @@ mod tests {
     async fn index_child_collected_in_the_same_pass_across_split_backends() {
         assert_index_and_child_collected_in_one_pass(&FSRegistryTestCase::with_split_backends())
             .await;
+    }
+
+    /// A referrer body naming `subject`, salted until its digest lists before
+    /// the subject's: the ordering that leaves it for a second run unless the
+    /// subject's deletion requeues it.
+    fn referrer_body_listing_before(subject: &Digest) -> Vec<u8> {
+        let mut salt = 0u32;
+        loop {
+            let body = format!(
+                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.example.report+json","config":{{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":0}},"layers":[],"subject":{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{subject}","size":0}},"annotations":{{"salt":"{salt}"}}}}"#
+            );
+            if Digest::sha256_of_bytes(&body).to_string() < subject.to_string() {
+                return body.into_bytes();
+            }
+            salt += 1;
+        }
+    }
+
+    /// Records `subject` and `referrer` as revisions, the referrer's back-link
+    /// on `subject`, and `tag` on the digest it names.
+    async fn setup_referrer_scenario(
+        metadata_store: &Arc<MetadataStore>,
+        namespace: &Namespace,
+        subject: &Digest,
+        referrer: &Digest,
+        tag: Option<(&str, &Digest)>,
+    ) {
+        let mut ops = vec![
+            LinkOperation::create(LinkKind::Digest(subject.clone()), subject.clone()),
+            LinkOperation::create(LinkKind::Digest(referrer.clone()), referrer.clone()),
+            LinkOperation::create(
+                LinkKind::Referrer {
+                    subject: subject.clone(),
+                    referrer: referrer.clone(),
+                },
+                referrer.clone(),
+            ),
+        ];
+        if let Some((tag, target)) = tag {
+            ops.push(LinkOperation::create(
+                LinkKind::Tag(Tag::new(tag).unwrap()),
+                target.clone(),
+            ));
+        }
+        metadata_store.update_links(namespace, &ops).await.unwrap();
+    }
+
+    fn keep_tagged_checker(test_case: &dyn RegistryTestCase) -> RetentionChecker {
+        let policy = Arc::new(RetentionPolicy::new(
+            &RetentionPolicyConfig {
+                rules: vec![CelRule::compile("image.tag != null").unwrap()],
+            },
+            Arc::new(SystemClock),
+        ));
+        let resolver = Arc::new(
+            RepositoryResolver::new(test_utils::create_test_repositories())
+                .expect("test repositories must not have overlapping prefixes"),
+        );
+        RetentionChecker::new(
+            test_case.blob_store(),
+            test_case.metadata_store(),
+            resolver,
+            Some(policy),
+        )
+    }
+
+    /// An untagged report follows its tagged subject instead of being judged
+    /// as untagged content of its own.
+    #[tokio::test]
+    async fn referrer_of_a_tagged_subject_survives_a_keep_tagged_policy() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/app").unwrap();
+            let metadata_store = test_case.metadata_store();
+            let blob_store = test_case.blob_store();
+
+            let subject = test_utils::put_blob_body(&blob_store, TEST_MANIFEST).await;
+            let referrer =
+                test_utils::put_blob_body(&blob_store, &referrer_body_listing_before(&subject))
+                    .await;
+            setup_referrer_scenario(
+                &metadata_store,
+                &namespace,
+                &subject,
+                &referrer,
+                Some(("latest", &subject)),
+            )
+            .await;
+
+            let executor = make_executor(blob_store, metadata_store.clone());
+            keep_tagged_checker(test_case)
+                .check(&namespace, &executor)
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(&namespace, &LinkKind::Digest(referrer))
+                    .await
+                    .is_ok(),
+                "the report of a live tagged image must survive"
+            );
+        })
+        .await;
+    }
+
+    /// A tagged referrer, such as a cosign fallback tag, no longer pins the
+    /// untagged image it signs.
+    #[tokio::test]
+    async fn referrer_does_not_pin_its_subject() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/app").unwrap();
+            let metadata_store = test_case.metadata_store();
+            let blob_store = test_case.blob_store();
+
+            let subject = test_utils::put_blob_body(&blob_store, TEST_MANIFEST).await;
+            let referrer =
+                test_utils::put_blob_body(&blob_store, &referrer_body_listing_before(&subject))
+                    .await;
+            setup_referrer_scenario(
+                &metadata_store,
+                &namespace,
+                &subject,
+                &referrer,
+                Some(("sha256-abc.sig", &referrer)),
+            )
+            .await;
+
+            let executor = make_executor(blob_store, metadata_store.clone());
+            keep_tagged_checker(test_case)
+                .check(&namespace, &executor)
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(&namespace, &LinkKind::Digest(subject))
+                    .await
+                    .is_err(),
+                "an untagged image is judged by the rules whatever refers to it"
+            );
+            assert!(
+                metadata_store
+                    .read_link(&namespace, &LinkKind::Digest(referrer))
+                    .await
+                    .is_ok(),
+                "the tagged referrer is retained by the rules"
+            );
+        })
+        .await;
+    }
+
+    /// One `check` collects an untagged subject and the referrer it pinned,
+    /// with the referrer listed first so only the requeue can reach it.
+    async fn assert_subject_and_referrer_collected_in_one_pass(test_case: &dyn RegistryTestCase) {
+        let namespace = Namespace::new("test-repo/app").unwrap();
+        let metadata_store = test_case.metadata_store();
+        let blob_store = test_case.blob_store();
+
+        let subject = test_utils::put_blob_body(&blob_store, TEST_MANIFEST).await;
+        let referrer =
+            test_utils::put_blob_body(&blob_store, &referrer_body_listing_before(&subject)).await;
+        setup_referrer_scenario(&metadata_store, &namespace, &subject, &referrer, None).await;
+
+        let executor = make_executor(blob_store, metadata_store.clone());
+        keep_tagged_checker(test_case)
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(subject))
+                .await
+                .is_err(),
+            "the untagged subject must be collected"
+        );
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(referrer))
+                .await
+                .is_err(),
+            "the referrer must be collected in the same pass, not left for the next run"
+        );
+    }
+
+    #[tokio::test]
+    async fn subject_and_referrer_collected_in_the_same_pass() {
+        for_each_backend(async |test_case| {
+            assert_subject_and_referrer_collected_in_one_pass(test_case).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subject_and_referrer_collected_in_the_same_pass_across_split_backends() {
+        assert_subject_and_referrer_collected_in_one_pass(
+            &FSRegistryTestCase::with_split_backends(),
+        )
+        .await;
     }
 
     #[tokio::test]
