@@ -105,7 +105,8 @@ listener.
 |-----------------------------|----------|----------|---------------------------------------------|
 | `max_concurrent_requests`   | non-zero usize | `64` | Tokio worker threads (minimum `1`, see Performance Tuning) |
 | `max_concurrent_cache_jobs` | usize    | `4`      | Maximum concurrent cache jobs (minimum `1`). With `[global.job_queue]` enabled, also bounds the number of jobs each `angos worker` processes in parallel. |
-| `max_concurrent_replication_jobs` | non-zero usize | `4` | Concurrency for replication jobs (minimum `1`). Bounds how many replication pushes are handled in parallel by each `angos worker`, the server's in-process drain, and the `angos replicate` end-of-run drain. |
+| `max_concurrent_replication_jobs` | non-zero usize | `4` | Concurrency for replication jobs (minimum `1`). Bounds how many replication pushes are handled in parallel by each `angos worker`, the server's in-process drain, and the `angos reconcile replication` end-of-run drain. |
+| `max_concurrent_scan_jobs` | usize | `2` | Worker concurrency for the scan queue |
 | `max_manifest_size`         | string   | `"5MiB"` | Maximum manifest body size accepted from clients or upstream registries |
 | `max_blob_size`             | string   | `"100GiB"` | Maximum total size of a single blob upload; a larger upload is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413) |
 | `blob_stream_frame_size`    | string   | `"128KiB"` | Read buffer each frame of a streamed blob response is filled from; larger frames cost fewer allocations and body writes per blob served, at one buffer per in-flight response |
@@ -114,6 +115,7 @@ listener.
 | `enable_manifest_redirect`  | bool     | `true`   | Allow HTTP 307 redirects for manifest downloads. Manifest bodies served via `response-content-type` to preserve the media type across redirects. |
 | `immutable_tags`            | bool     | `false`  | Global immutable tags default               |
 | `immutable_tags_exclusions` | [string] | `[]`     | Regex patterns for mutable tags             |
+| `scan` | bool | `false` | Send each image manifest pushed here to the scanner service |
 | `allow_missing_manifest_references` | bool | `true` | When `true` (default), accept a manifest push whose referenced blobs or child manifests are not yet present/owned in the namespace; the missing references stay unreadable until their content is pushed. Set to `false` to reject such pushes with `MANIFEST_BLOB_UNKNOWN`. See note below. |
 | `authorization_webhook`     | string   | -        | Name of webhook for authorization           |
 | `event_webhooks`            | [string] | `[]`     | Event webhook names for all repositories    |
@@ -484,9 +486,9 @@ Array of downstream registries to which this repository's mutations are replicat
 | `client_private_key`    | string   | -                  | Client key for mTLS (requires `client_certificate`)                     |
 
 `mode` values:
-- `event+reconcile` (default): push on every local mutation **and** include in `angos replicate`.
-- `event-only`: push on local mutations; excluded from `angos replicate` reconciliation.
-- `reconcile-only`: excluded from live pushes; mirrored only via `angos replicate`.
+- `event+reconcile` (default): push on every local mutation **and** include in `angos reconcile replication`.
+- `event-only`: push on local mutations; excluded from `angos reconcile replication` reconciliation.
+- `reconcile-only`: excluded from live pushes; mirrored only via `angos reconcile replication`.
 
 If either `client_certificate` or `client_private_key` is set, both must be set.
 
@@ -523,6 +525,34 @@ Webhooks are enabled by referencing their names:
 |----------------------------|------------------|----------|------------------------------------|
 | `global`                   | `event_webhooks` | [string] | Webhook names for all repositories |
 | `repository."<namespace>"` | `event_webhooks` | [string] | Webhook names for this repository  |
+
+---
+
+## Scanning (`global.scan`)
+
+The scanner service each `scan = true` repository sends its image pushes to.
+
+| Option         | Type   | Default | Description                                                  |
+|----------------|--------|---------|--------------------------------------------------------------|
+| `url`          | string | required | Base URL of the scanner service; the job posts to its `/scan` |
+| `token`        | string | -       | Bearer token the service expects, when it checks one         |
+| `timeout_secs` | u64    | `600`   | Bound on one scan request, pull and analysis included        |
+
+A repository opts in with `scan = true`; setting it without `[global.scan]` fails validation. `max_concurrent_scan_jobs` in `[global]` sizes the scan queue's worker pool.
+
+## Scanner Service (`scanner`)
+
+Read by `angos scanner` alone, so a scanner host's configuration can hold this section and nothing else; the registry ignores it.
+
+| Option                 | Type   | Default   | Description                                                  |
+|------------------------|--------|-----------|--------------------------------------------------------------|
+| `bind_address`         | string | `0.0.0.0` | Address the service listens on                               |
+| `port`                 | u16    | `8766`    | Port the service listens on                                  |
+| `token`                | string | -         | Bearer token a scan request must carry; unset accepts any    |
+| `max_concurrent_scans` | usize  | `2`       | Scanner processes run at once; further requests wait. Trivy locks its cache and runs one at a time whatever the value |
+| `registry.url`         | string | required  | Registry the scanner pulls images from                       |
+| `registry.username`    | string | -         | Identity the scanner pulls with                              |
+| `registry.password`    | string | -         | Its password                                                 |
 
 ---
 

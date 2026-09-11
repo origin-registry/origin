@@ -164,7 +164,7 @@ Displays images within a repository:
 Tree view of all manifests:
 - Multi-platform indexes with expandable children
 - Platform badges (e.g., `linux/amd64`, `linux/arm64`)
-- Attestations badges: SBOM, SLSA, signature, etc.
+- Attestations badges: SBOM, SLSA, signature, vulnerability report, etc.
 - Tags as clickable badges
 - Digest (shortened, click to copy full)
 - Push time
@@ -184,6 +184,7 @@ Complete manifest information:
 - **Layers/Children**: For images or indexes
 - **Annotations**: Expandable metadata
 - **Files**: For ORAS artifacts with download links
+- **Vulnerabilities**: an image with a scan report, and the report manifest itself, show a table beside the manifest with the findings by severity, the scanner and the scan time; its rows open the report page, which links back to the scanned manifest with its tags and to the report manifest, and lists every finding, filterable by severity, with the package, installed and fixed versions and a link to the advisory. The counts also appear next to the `vuln` badge in the tree and in referrer lists.
 - **Referrers**: Linked signatures, SBOMs, etc. The first 100 per manifest load with the view; a "Load more referrers" control fetches the next page from the referrers endpoint, so browsing past the first page needs the `get-referrers` action.
 - **Parent**: Link to parent index if applicable
 - **Pull history**: Collapsed by default and fetched on expand, listing the newest 100 recorded pulls of the reference the view was addressed by (a tag and a digest are recorded separately). The heading states the configured retention, since superseded entries are collected past it; recording happens only when `update_pull_time` is enabled.

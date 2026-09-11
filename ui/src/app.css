@@ -482,7 +482,8 @@ a:hover {
 .tag,
 .tag-standalone,
 .platform,
-.attestation {
+.attestation,
+.severity {
 	display: inline-flex;
 	align-items: center;
 	padding: 0.2rem 0.4rem;
@@ -586,6 +587,78 @@ a:hover {
 .attestation-signature {
 	background: var(--color-success);
 	color: #ffffff;
+}
+
+.attestation-vuln {
+	background: #d97706;
+	color: #ffffff;
+}
+
+/* ===== SCAN SUMMARY ===== */
+.scan-summary {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 0.25rem;
+	margin-left: 0.4rem;
+	vertical-align: middle;
+}
+
+.severity {
+	font-weight: 600;
+	color: #ffffff;
+	text-transform: capitalize;
+}
+
+.severity-critical {
+	background: #7f1d1d;
+}
+
+.severity-high {
+	background: #dc2626;
+}
+
+.severity-medium {
+	background: #d97706;
+}
+
+.severity-low {
+	background: #2563eb;
+}
+
+.severity-unknown {
+	background: var(--color-text-muted);
+}
+
+.severity-clean {
+	background: var(--color-success);
+}
+
+.manifest-header {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 1rem;
+	align-items: start;
+}
+
+@media (max-width: 800px) {
+	.manifest-header {
+		grid-template-columns: 1fr;
+	}
+}
+
+.scan-card {
+	min-width: 16rem;
+}
+
+/* The card is as narrow as its content, so the header's space-between has
+   nothing to distribute; the gap keeps the title off the meta text. */
+.scan-card .card-header {
+	gap: 1.5rem;
+}
+
+.scan-meta {
+	color: var(--color-text-muted);
+	font-size: 0.75rem;
 }
 
 .attestation-artifact {

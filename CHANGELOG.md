@@ -4,10 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.7.3 - UNRELEASED
+## 1.8.0 - UNRELEASED
+
+### Added
+
+- Vulnerability scanning: a repository with `scan = true` enqueues a durable `scan` job for each image manifest pushed, and its handler asks the scanner service named by `[global.scan]` for a SARIF report and pushes it back as a referrer of the image through the registry's own write path, so the report lists under the referrers API, replicates with the image, and is reclaimed with it by retention.
+- `angos scanner grype` and `angos scanner trivy` run the scanner service those jobs call: a stateless `POST /scan` that pulls the named image under the identity of its own `[scanner]` section and answers with the report, with Trivy run one scan at a time since it locks its cache.
+- `angos worker` drains the `scan` queue whenever `[global.scan]` is configured, sized by `max_concurrent_scan_jobs`, and the server drains it in-process without a durable queue; the `_angos/jobs` admin API and the web UI's Jobs page list it like the other queues.
+- `angos reconcile scan` enqueues a scan for every image of a `scan = true` repository that carries no report, or for every image with `--force`, so content pushed before scanning was enabled gets a report and a scanner update can refresh them all.
+- The web UI badges a referrer holding a vulnerability report as `vuln`: a SARIF artifact, or an in-toto `vulns` or cosign `vuln` predicate. A report the scan handler attached carries its severity counts as `io.angos.scan.*` annotations, shown in a table beside the image's manifest, beside the report manifest itself, and next to the badge in listings; its rows open a report page listing every finding, filterable by severity, with package, installed and fixed versions and the advisory link. A predicate now decides the badge before the envelope's artifact type, so an SBOM attested inside an in-toto envelope reads as `SBOM` rather than `SLSA`.
 
 ### Changed
 
+- **Breaking:** `angos replicate` is now `angos reconcile replication`; options and behaviour are unchanged.
 - **Breaking:** a referrer such as a signature, an SBOM or a scan report no longer pins its subject against retention and is no longer judged as untagged content of its own: `angos prune` skips it while its subject resolves and reclaims it with the subject in the same run.
 - The container image runs as UID 65534 instead of root, so a bind-mounted data directory must be owned by that user and a mounted private key readable by it; see the upgrade guide.
 

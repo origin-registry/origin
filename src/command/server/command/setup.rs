@@ -20,6 +20,7 @@ use crate::{
         repository_resolver::RepositoryResolver,
     },
     replication::ReplicationJobHandler,
+    scan::ScanJobHandler,
 };
 
 /// A built registry and what the server owns around it: the handle its
@@ -40,6 +41,24 @@ pub struct InProcessLoops {
 }
 
 impl InProcessLoops {
+    /// Adds `count` claim loops for `queue`, stopped with the others.
+    fn spawn(
+        &self,
+        job_store: &Arc<JobStore>,
+        handler: &Arc<dyn JobHandler>,
+        queue: Queue,
+        count: NonZeroUsize,
+    ) {
+        for _ in 0..count.get() {
+            self.tracker.spawn(claim_loop(
+                job_store.clone(),
+                handler.clone(),
+                queue,
+                self.shutdown.clone(),
+            ));
+        }
+    }
+
     /// No loops, so nothing to stop.
     fn none() -> Self {
         Self {
@@ -211,7 +230,31 @@ pub async fn build_registry(
         event_dispatcher,
         ..RegistryConfig::new(job_store)
     };
+    let job_store = registry_config.job_queue.clone();
+    let (blob_store_for_scan, metadata_store_for_scan) =
+        (blob_backend.clone(), metadata_store.clone());
     let registry = Registry::new(blob_backend, metadata_store, repositories, registry_config);
+    // The scan handler pushes reports through the registry, so its loops can
+    // only start once the registry exists.
+    if let Some(scan) = &config.global.scan
+        && config.global.job_queue.is_none()
+    {
+        let handler: Arc<dyn JobHandler> = Arc::new(
+            ScanJobHandler::new(
+                registry.clone(),
+                blob_store_for_scan,
+                metadata_store_for_scan,
+                scan,
+            )
+            .map_err(Error::from)?,
+        );
+        in_process_loops.spawn(
+            &job_store,
+            &handler,
+            Queue::Scan,
+            config.global.max_concurrent_scan_jobs,
+        );
+    }
 
     Ok(BuiltRegistry {
         registry,

@@ -1,0 +1,425 @@
+use std::sync::Arc;
+
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
+
+use angos_oci::{Digest, Manifest, Namespace};
+
+use crate::{
+    jobs::{
+        Queue,
+        store::{ClaimMode, JobHandler, JobStore},
+    },
+    registry::{
+        Registry, RegistryConfig,
+        manifest::read_manifest,
+        metadata_store::LinkKind,
+        test_utils::{
+            fs_test_stack, repository_with_replication, seed_manifest, single_repo_resolver,
+        },
+    },
+    scan::{
+        SARIF_MEDIA_TYPE, ScanConfig, ScanImagePayload, ScanJobHandler, ScanSummary,
+        build_envelope, is_scan_subject,
+    },
+    secret::Secret,
+};
+
+const SARIF: &[u8] = br#"{"version":"2.1.0","runs":[]}"#;
+
+/// The SARIF referrers of `digest`, read the way the handler's own no-op
+/// check reads them.
+async fn sarif_referrers(
+    stack: &crate::registry::test_utils::FsTestStack,
+    namespace: &Namespace,
+    digest: &Digest,
+) -> Vec<Digest> {
+    use futures_util::TryStreamExt;
+    let referrers: Vec<Digest> = stack
+        .metadata_store
+        .stream_referrer_digests(namespace, digest)
+        .try_collect()
+        .await
+        .unwrap();
+    let mut reports = Vec::new();
+    for referrer in referrers {
+        let link = LinkKind::Referrer {
+            subject: digest.clone(),
+            referrer: referrer.clone(),
+        };
+        let metadata = stack
+            .metadata_store
+            .read_link(namespace, &link)
+            .await
+            .unwrap();
+        if metadata
+            .descriptor
+            .and_then(|d| d.artifact_type)
+            .is_some_and(|t| t.as_ref() == SARIF_MEDIA_TYPE)
+        {
+            reports.push(referrer);
+        }
+    }
+    reports
+}
+
+#[test]
+fn scan_jobs_coalesce_on_the_image_digest() {
+    let namespace = Namespace::new("apps/web").unwrap();
+    let digest = Digest::sha256_of_bytes(b"image");
+    let envelope = build_envelope(&ScanImagePayload {
+        namespace: namespace.clone(),
+        digest: digest.clone(),
+        force: false,
+    })
+    .unwrap();
+    assert_eq!(envelope.queue, Queue::Scan);
+    assert_eq!(
+        envelope.lock_key.as_str(),
+        format!("scan.{namespace}:{digest}")
+    );
+}
+
+#[test]
+fn only_a_plain_image_manifest_is_a_scan_subject() {
+    let image = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":0},"layers":[]}"#;
+    let report = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/sarif+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":0}}"#;
+    let index = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+    assert!(is_scan_subject(
+        &Manifest::from_slice(image.as_bytes()).unwrap()
+    ));
+    assert!(!is_scan_subject(
+        &Manifest::from_slice(report.as_bytes()).unwrap()
+    ));
+    assert!(!is_scan_subject(
+        &Manifest::from_slice(index.as_bytes()).unwrap()
+    ));
+}
+
+/// The handler asks the scanner service for the report, pushes it as a SARIF
+/// referrer of the image through the registry, and a re-run finds the report
+/// already there rather than asking again.
+#[tokio::test]
+async fn a_scan_job_attaches_one_report_and_reruns_as_a_no_op() {
+    let stack = fs_test_stack();
+    let namespace = Namespace::new("apps/web").unwrap();
+    let (image, _config, _layer) =
+        seed_manifest(&stack.store, &stack.metadata_store, &namespace).await;
+
+    let scanner = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/scan"))
+        .and(header("authorization", "Bearer s3cret"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(SARIF))
+        .expect(1)
+        .mount(&scanner)
+        .await;
+
+    let job_store = Arc::new(JobStore::new(
+        stack.store.clone(),
+        "scan-test",
+        ClaimMode::Atomic,
+    ));
+    let resolver = single_repo_resolver("apps", repository_with_replication("apps", Vec::new()));
+    let registry = Registry::new(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        resolver,
+        RegistryConfig::new(job_store),
+    );
+    let handler = ScanJobHandler::new(
+        registry,
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        &ScanConfig {
+            url: scanner.uri(),
+            token: Some(Secret::new("s3cret".to_string())),
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+
+    let envelope = build_envelope(&ScanImagePayload {
+        namespace: namespace.clone(),
+        digest: image.clone(),
+        force: false,
+    })
+    .unwrap();
+    handler.execute(&envelope).await.unwrap();
+
+    let reports = sarif_referrers(&stack, &namespace, &image).await;
+    assert_eq!(
+        reports.len(),
+        1,
+        "one SARIF referrer must hang off the image"
+    );
+    let report = read_manifest(&stack.blob_store, &reports[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.subject.map(|s| s.digest), Some(image.clone()));
+    assert_eq!(
+        report.artifact_type.map(|t| t.as_ref().to_string()),
+        Some(SARIF_MEDIA_TYPE.to_string())
+    );
+
+    handler.execute(&envelope).await.unwrap();
+    assert_eq!(
+        sarif_referrers(&stack, &namespace, &image).await.len(),
+        1,
+        "a re-run must not attach a second report"
+    );
+    // `expect(1)` on the mock fails the test at drop if the re-run scanned again.
+}
+
+/// A scanner failure is a retryable job failure, not a silent skip.
+#[tokio::test]
+async fn a_failing_scanner_fails_the_job() {
+    let stack = fs_test_stack();
+    let namespace = Namespace::new("apps/web").unwrap();
+    let (image, _, _) = seed_manifest(&stack.store, &stack.metadata_store, &namespace).await;
+    let scanner = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("grype exited with 1"))
+        .mount(&scanner)
+        .await;
+    let job_store = Arc::new(JobStore::new(
+        stack.store.clone(),
+        "scan-test",
+        ClaimMode::Atomic,
+    ));
+    let resolver = single_repo_resolver("apps", repository_with_replication("apps", Vec::new()));
+    let registry = Registry::new(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        resolver,
+        RegistryConfig::new(job_store),
+    );
+    let handler = ScanJobHandler::new(
+        registry,
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        &ScanConfig {
+            url: scanner.uri(),
+            token: None,
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    let err = handler
+        .execute(
+            &build_envelope(&ScanImagePayload {
+                namespace: namespace.clone(),
+                digest: image.clone(),
+                force: false,
+            })
+            .unwrap(),
+        )
+        .await
+        .expect_err("a 502 from the scanner must fail the job");
+    assert!(err.to_string().contains("grype exited with 1"), "{err}");
+    assert!(sarif_referrers(&stack, &namespace, &image).await.is_empty());
+}
+
+/// A push into a `scan = true` repository enqueues one scan job for an image
+/// manifest and none for a report, while a repository without the flag
+/// enqueues nothing.
+#[tokio::test]
+async fn a_push_enqueues_a_scan_job_only_for_an_image_in_a_scanning_repository() {
+    use std::io::Cursor;
+
+    use angos_oci::{MediaType, Reference, request::PutManifestRequest};
+
+    let stack = fs_test_stack();
+    let namespace = Namespace::new("apps/web").unwrap();
+    let (_, config, layer) = seed_manifest(&stack.store, &stack.metadata_store, &namespace).await;
+    let job_store = Arc::new(JobStore::new(
+        stack.store.clone(),
+        "scan-test",
+        ClaimMode::Atomic,
+    ));
+    let mut repository = repository_with_replication("apps", Vec::new());
+    repository.scan = true;
+    // The seeded digests carry links but no bytes; the push under test is
+    // about enqueueing, not reference validation.
+    let registry = Registry::new(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        single_repo_resolver("apps", repository),
+        RegistryConfig {
+            validate_manifest_references: false,
+            ..RegistryConfig::new(job_store.clone())
+        },
+    );
+    let push = |body: String, namespace: &Namespace| {
+        let request = PutManifestRequest {
+            namespace: namespace.clone(),
+            reference: Reference::Digest(Digest::sha256_of_bytes(body.as_bytes())),
+            content_type: Some(MediaType::oci_manifest()),
+            tags: Vec::new(),
+            source_ts: None,
+        };
+        registry.accept_put_manifest(None, request, Cursor::new(body.into_bytes()))
+    };
+    let descriptor = |media: &str, digest: &Digest| {
+        format!(r#"{{"mediaType":"{media}","digest":"{digest}","size":1}}"#)
+    };
+    let image = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[{}],"annotations":{{"v":"2"}}}}"#,
+        descriptor("application/vnd.oci.image.config.v1+json", &config),
+        descriptor("application/vnd.oci.image.layer.v1.tar", &layer),
+    );
+    push(image.clone(), &namespace).await.unwrap();
+    assert_eq!(job_store.count_pending(Queue::Scan, 0).await.unwrap(), 1);
+
+    let report = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/sarif+json","config":{},"layers":[{}],"subject":{}}}"#,
+        descriptor("application/vnd.oci.image.config.v1+json", &config),
+        descriptor("application/vnd.oci.image.layer.v1.tar", &layer),
+        descriptor(
+            "application/vnd.oci.image.manifest.v1+json",
+            &Digest::sha256_of_bytes(image.as_bytes())
+        ),
+    );
+    push(report, &namespace).await.unwrap();
+    assert_eq!(
+        job_store.count_pending(Queue::Scan, 0).await.unwrap(),
+        1,
+        "a report is not a scan subject"
+    );
+
+    let other = Namespace::new("other/web").unwrap();
+    let (_, config, layer) = seed_manifest(&stack.store, &stack.metadata_store, &other).await;
+    let foreign = format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[{}],"annotations":{{"v":"3"}}}}"#,
+        descriptor("application/vnd.oci.image.config.v1+json", &config),
+        descriptor("application/vnd.oci.image.layer.v1.tar", &layer),
+    );
+    push(foreign, &other).await.unwrap();
+    assert_eq!(
+        job_store.count_pending(Queue::Scan, 0).await.unwrap(),
+        1,
+        "a repository without scan = true enqueues nothing"
+    );
+}
+
+/// `--force` scans an image that already carries a report and attaches a
+/// second one.
+#[tokio::test]
+async fn a_forced_scan_job_scans_a_reported_image_again() {
+    let stack = fs_test_stack();
+    let namespace = Namespace::new("apps/web").unwrap();
+    let (image, _, _) = seed_manifest(&stack.store, &stack.metadata_store, &namespace).await;
+    let scanner = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(SARIF))
+        .expect(2)
+        .mount(&scanner)
+        .await;
+    let job_store = Arc::new(JobStore::new(
+        stack.store.clone(),
+        "scan-test",
+        ClaimMode::Atomic,
+    ));
+    let resolver = single_repo_resolver("apps", repository_with_replication("apps", Vec::new()));
+    let registry = Registry::new(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        resolver,
+        RegistryConfig::new(job_store),
+    );
+    let handler = ScanJobHandler::new(
+        registry,
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        &ScanConfig {
+            url: scanner.uri(),
+            token: None,
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    handler
+        .execute(
+            &build_envelope(&ScanImagePayload {
+                namespace: namespace.clone(),
+                digest: image.clone(),
+                force: false,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    handler
+        .execute(
+            &build_envelope(&ScanImagePayload {
+                namespace: namespace.clone(),
+                digest: image.clone(),
+                force: true,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The forced report carries a later `created` annotation, so it is a
+    // distinct manifest and a second referrer.
+    assert_eq!(sarif_referrers(&stack, &namespace, &image).await.len(), 2);
+}
+
+/// Trivy tags each rule with its severity and states it in the message;
+/// counts follow the tags.
+#[test]
+fn summary_counts_trivy_severities_from_rule_tags() {
+    let report = br#"{"runs":[{"tool":{"driver":{"name":"Trivy","version":"0.74.0","rules":[
+        {"id":"CVE-1","properties":{"security-severity":"2.0","tags":["vulnerability","LOW"]}},
+        {"id":"CVE-2","properties":{"security-severity":"9.8","tags":["vulnerability","CRITICAL"]}}
+    ]}},"results":[
+        {"ruleId":"CVE-1","ruleIndex":0,"message":{"text":"Package: apt\nSeverity: LOW"}},
+        {"ruleId":"CVE-2","ruleIndex":1,"message":{"text":"Package: ssl\nSeverity: CRITICAL"}},
+        {"ruleId":"CVE-2","ruleIndex":1,"message":{"text":"Package: ssl\nSeverity: CRITICAL"}}
+    ]}]}"#;
+    let summary = ScanSummary::of(report);
+    assert_eq!(summary.scanner.as_deref(), Some("Trivy 0.74.0"));
+    assert_eq!(
+        (
+            summary.critical,
+            summary.high,
+            summary.medium,
+            summary.low,
+            summary.unknown
+        ),
+        (2, 0, 0, 1, 0)
+    );
+}
+
+/// Grype states the severity in the message and carries only a score on the
+/// rule; a result naming no known rule falls back to the score, then unknown.
+#[test]
+fn summary_reads_grype_messages_then_scores() {
+    let report = br#"{"runs":[{"tool":{"driver":{"name":"grype","version":"0.79.1","rules":[
+        {"id":"CVE-9-busybox","properties":{"security-severity":"6.5"}},
+        {"id":"CVE-8-zlib","properties":{"security-severity":"7.5"}},
+        {"id":"CVE-7-none","properties":{}}
+    ]}},"results":[
+        {"ruleId":"CVE-9-busybox","message":{"text":"A medium vulnerability in apk package: busybox"}},
+        {"ruleId":"CVE-8-zlib","message":{"text":"found in image"}},
+        {"ruleId":"CVE-7-none","message":{"text":"found in image"}}
+    ]}]}"#;
+    let summary = ScanSummary::of(report);
+    assert_eq!((summary.medium, summary.high, summary.unknown), (1, 1, 1));
+    assert_eq!(
+        summary
+            .annotations()
+            .iter()
+            .find(|(k, _)| k == "io.angos.scan.high")
+            .map(|(_, v)| v.as_str()),
+        Some("1")
+    );
+}
+
+#[test]
+fn summary_of_a_non_sarif_body_is_empty() {
+    assert_eq!(ScanSummary::of(b"not json"), ScanSummary::default());
+}

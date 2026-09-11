@@ -1,0 +1,27 @@
+# E2E overlay: an external scanner driven by the manifest.push webhook. A
+# hook on the host at 127.0.0.1:8766 scans the pushed image with Grype and
+# attaches the SARIF report as a referrer; retention keeps the report with
+# its image and reclaims both together. Passed as a second `-c` file, so its
+# [global]
+gc_grace_secs = 0
+
+[global.scan]
+url = "http://127.0.0.1:8766"
+token = "e2e-scan-secret"
+
+[global.access_policy]
+default = "allow"
+
+[global.retention_policy]
+rules = ["image.tag != null"]
+
+[repository."scan"]
+scan = true
+
+[scanner]
+bind_address = "127.0.0.1"
+port = 8766
+token = "e2e-scan-secret"
+
+[scanner.registry]
+url = "http://127.0.0.1:8000"

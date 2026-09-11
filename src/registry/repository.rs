@@ -217,6 +217,9 @@ pub struct Config {
     pub authorization_webhook: Option<String>,
     #[serde(default)]
     pub event_webhooks: Vec<String>,
+    /// Whether each image manifest pushed here is sent to the scanner service.
+    #[serde(default)]
+    pub scan: bool,
 }
 
 impl Config {
@@ -241,6 +244,7 @@ pub struct Repository {
     pub retention_policy: RetentionPolicy,
     pub immutable_tags: bool,
     pub immutable_tags_exclusions: Vec<RegexPattern>,
+    pub scan: bool,
 }
 
 impl Repository {
@@ -305,6 +309,7 @@ impl Repository {
             retention_policy,
             immutable_tags: config.immutable_tags,
             immutable_tags_exclusions: config.immutable_tags_exclusions.clone(),
+            scan: config.scan,
         })
     }
 

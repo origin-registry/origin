@@ -21,15 +21,17 @@ use serde::{Deserialize, Serialize};
 pub enum Queue {
     Cache,
     Replication,
+    Scan,
 }
 
 impl Queue {
-    /// The on-disk / metric-label name (`"cache"` or `"replication"`).
+    /// The on-disk / metric-label name (`"cache"`, `"replication"` or `"scan"`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Queue::Cache => "cache",
             Queue::Replication => "replication",
+            Queue::Scan => "scan",
         }
     }
 }
@@ -47,8 +49,9 @@ impl FromStr for Queue {
         match s {
             "cache" => Ok(Queue::Cache),
             "replication" => Ok(Queue::Replication),
+            "scan" => Ok(Queue::Scan),
             other => Err(format!(
-                "unknown queue '{other}'; expected 'cache' or 'replication'"
+                "unknown queue '{other}'; expected 'cache', 'replication' or 'scan'"
             )),
         }
     }

@@ -19,8 +19,11 @@ matrix variant it:
 |-----------------------------|-------------------------------------------------------------|
 | `overlay-push.toml`         | push an image to angos, drop it locally, pull it back       |
 | `overlay-cache.toml`        | pull-through cache for Docker Hub                           |
+| `overlay-scan.toml`         | webhook-driven Grype scan attached as a referrer; retention keeps the report with its image. The receiver and handler are extracted from the scan-images how-to, so the published steps are what runs |
 | `overlay-replication-a.toml`| replication source; mirrors the `repl` repo to instance B   |
 | `overlay-replication-b.toml`| replication target (runs on port 8001)                      |
+
+The scan overlay opens `[global]` itself, so it is passed as a second `-c` file rather than concatenated; the loader merges the two tables.
 
 For the replication scenario the two instances share the same backend service
 (rustfs), so instance B is rewritten to use an isolated S3 bucket

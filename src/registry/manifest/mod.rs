@@ -29,6 +29,7 @@ use crate::{
         pull_through_name, record_pull_through, repository_name,
     },
     replication::{ReplicationDownstream, ReplicationJob, ReplicationTarget, build_envelope},
+    scan,
 };
 use response::{GetManifestResponse, ManifestBody, ManifestMeta, PutManifestResponse};
 
@@ -551,6 +552,8 @@ impl Registry {
                 .iter()
                 .any(|tag| commit.changed(&LinkKind::Tag(tag.clone()), &computed_digest));
 
+        let scan_subject = scan::is_scan_subject(&manifest);
+
         let subject = manifest.subject.map(|s| s.digest);
 
         Ok(PutManifestResponse {
@@ -563,6 +566,7 @@ impl Registry {
             )?,
             digest: computed_digest,
             changed,
+            scan_subject,
         })
     }
 
@@ -1117,6 +1121,9 @@ impl Registry {
                 &response.digest,
             )
             .await;
+            if response.scan_subject && resolved_repository.is_some_and(|r| r.scan) {
+                self.dispatch_scan(&namespace, &response.digest).await;
+            }
         }
 
         Ok(build_response(
@@ -1124,6 +1131,31 @@ impl Registry {
             response.headers,
             ResponseBody::empty(),
         )?)
+    }
+
+    /// Fire-and-forget enqueue of the scan job for an image that just landed;
+    /// a failure is logged and counted but never fails the client's write.
+    async fn dispatch_scan(&self, namespace: &Namespace, digest: &Digest) {
+        let payload = scan::ScanImagePayload {
+            namespace: namespace.clone(),
+            digest: digest.clone(),
+            force: false,
+        };
+        let outcome = match scan::build_envelope(&payload) {
+            Ok(envelope) => self
+                .job_queue
+                .enqueue(envelope)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(error) = outcome {
+            warn!("Failed to dispatch scan job for {namespace}@{digest}: {error}");
+            metrics_provider()
+                .job_queue_enqueue_failures_total
+                .with_label_values(&[Queue::Scan.as_str()])
+                .inc();
+        }
     }
 
     /// Replicates a push for the path tag plus each `?tag=` created tag, so a

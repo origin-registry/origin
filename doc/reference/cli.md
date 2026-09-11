@@ -182,30 +182,50 @@ Schedule `prune` like `scrub`, with a Kubernetes CronJob or a systemd timer; see
 
 ---
 
-### replicate
+### reconcile
+
+On-demand passes that bring stored content in line with the configuration.
+Each enqueues jobs rather than acting inline, so its work gets the event
+path's retry, backoff and coalescing.
+
+```bash
+angos reconcile replication [options]
+angos reconcile scan [options]
+```
+
+#### reconcile replication
 
 Reconcile every replicated namespace against all its configured downstreams.
 
-```bash
-angos replicate [options]
-```
-
 By default reconciliation is additive: it enqueues a replication push for each diverging or downstream-missing tag and never deletes, then drains the enqueued jobs in-process. A downstream marked `prune = true` is treated as an authoritative one-way mirror: reconciliation also enqueues a replication delete for each downstream-only tag, so it is one-way-only by design and unsafe for active-active peers (even with receiver-side last-writer-wins it can remove a peer's newer tag). See [Configure Replication](../how-to/configure-replication.md).
-
-**Options:**
 
 | Option      | Short | Description                                    |
 |-------------|-------|------------------------------------------------|
 | `--dry-run` | `-d`  | Preview what would be enqueued without changes |
 
+#### reconcile scan
+
+Enqueue a scan job for every image manifest of a `scan = true` repository that carries no report, so images pushed before scanning was enabled, or whose scan failed past its retries, get one. The running server or a worker drains the jobs; the command returns once they are enqueued. See [Scan Images](../how-to/scan-images.md).
+
+| Option      | Short | Description                                              |
+|-------------|-------|----------------------------------------------------------|
+| `--dry-run` | `-d`  | Preview what would be enqueued without changes           |
+| `--force`   |       | Scan every image again, attaching a fresh report to each |
+
 **Examples:**
 
 ```bash
 # Preview replication reconciliation (enqueues nothing)
-angos replicate --dry-run
+angos reconcile replication --dry-run
 
 # Reconcile every replicated repository with its downstreams
-angos replicate
+angos reconcile replication
+
+# Give every unreported image a scan
+angos reconcile scan
+
+# Re-scan everything after a scanner database update
+angos reconcile scan --force
 ```
 
 ---
@@ -213,9 +233,10 @@ angos replicate
 ### worker
 
 Process durable background jobs from the job queue. With no `--queue` argument
-the worker drains **both** the pull-through cache queue and the replication
-queue, each on its own worker pool. Pass `--queue` (repeatable) to drain
-specific queues instead, e.g. `angos worker --queue replication`.
+the worker drains the pull-through cache queue, the replication queue and,
+when `[global.scan]` is configured, the scan queue, each on its own worker
+pool. Pass `--queue` (repeatable) to drain specific queues instead, e.g.
+`angos worker --queue replication`.
 
 ```bash
 angos worker [options]
@@ -234,7 +255,7 @@ finish on the components they started with.
 
 | Option | Default | Description |
 |---|---|---|
-| `--queue <name>` | `cache` and `replication` | Queue to drain. Repeatable (`--queue cache --queue replication`); each queue runs its own worker pool sized by `max_concurrent_cache_jobs` / `max_concurrent_replication_jobs`. |
+| `--queue <name>` | every configured queue | Queue to drain: `cache`, `replication` or `scan`. Repeatable; each queue runs its own worker pool sized by `max_concurrent_cache_jobs`, `max_concurrent_replication_jobs` or `max_concurrent_scan_jobs`. |
 | `--poll-interval <duration>` | `1s` | Minimum idle sleep between claim attempts. When the queue contains only backed-off envelopes, the worker extends the wait up to the soonest `not_before` (capped at 1 minute, or `--poll-interval` if it is larger). |
 
 **Example:**
@@ -242,6 +263,30 @@ finish on the components they started with.
 ```bash
 angos -c config.toml worker
 ```
+
+---
+
+### scanner
+
+Run the scanner service: it answers each `POST /scan` naming an image with the
+SARIF report of the named scanner, pulling the image under the `[scanner]`
+identity. The registry's scan jobs call it.
+
+```bash
+angos scanner <scanner>
+angos -c /etc/angos/scanner.toml scanner grype
+```
+
+Reads the `[scanner]` section alone, so its configuration file need not
+describe a registry. The scanner, `grype` or `trivy`, must be on `PATH`. A
+request is checked against `[scanner] token` when one is set. See
+[Scan Images](../how-to/scan-images.md).
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<scanner>` | `grype` or `trivy` |
 
 ---
 

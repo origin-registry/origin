@@ -333,7 +333,7 @@ mod tests {
         test_util::{HookedStore, StoreHook, StoreOp},
     };
 
-    use crate::command::replicate::checker::ReplicationChecker;
+    use crate::command::reconcile::replication::checker::ReplicationChecker;
     use crate::registry::keys::NamespaceKeys;
     use crate::{
         command::maintenance::{

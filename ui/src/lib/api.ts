@@ -144,7 +144,7 @@ interface FailedJobsResponse {
 
 export type JobState = 'pending' | 'failed';
 
-export type JobQueue = 'cache' | 'replication';
+export type JobQueue = 'cache' | 'replication' | 'scan';
 
 const MANIFEST_ACCEPT_HEADER = [
 	'application/vnd.oci.image.manifest.v1+json',
@@ -330,4 +330,20 @@ export async function cancelUpload(namespace: string, uuid: string): Promise<str
 
 export function blobUrl(namespace: string, digest: string): string {
 	return `/v2/${namespace}/blobs/${digest}`;
+}
+
+// A blob body as JSON, served by the registry itself rather than by a
+// presigned redirect the browser could not read across origins.
+export async function fetchBlobJson<T>(namespace: string, digest: string): Promise<FetchResult<T>> {
+	try {
+		const response = await fetch(blobUrl(namespace, digest), {
+			headers: { 'X-Angos-No-Redirect': '1' }
+		});
+		if (!response.ok) {
+			return { data: null, error: `HTTP ${response.status}` };
+		}
+		return { data: (await response.json()) as T, error: null };
+	} catch (e) {
+		return { data: null, error: e instanceof Error ? e.message : 'Request failed' };
+	}
 }

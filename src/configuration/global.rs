@@ -3,6 +3,7 @@ use std::num::NonZeroUsize;
 use bytesize::ByteSize;
 use serde::Deserialize;
 
+use crate::scan::ScanConfig;
 use crate::{
     configuration::{RegexPattern, TrustedProxy},
     jobs::store::JobQueueConfig,
@@ -20,6 +21,8 @@ pub const DEFAULT_MAX_CONCURRENT_CACHE_JOBS: NonZeroUsize = NonZeroUsize::new(4)
 
 /// Default replication-worker concurrency; the `unwrap` is const-evaluated.
 pub const DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+/// Worker concurrency for the scan queue; a scan is minutes of scanner work.
+pub const DEFAULT_MAX_CONCURRENT_SCAN_JOBS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 // A config struct is naturally flag-heavy; the bool count is not an API smell.
 #[allow(clippy::struct_excessive_bools)]
@@ -32,6 +35,8 @@ pub struct GlobalConfig {
     /// Worker concurrency for the replication queue.
     #[serde(default = "default_max_concurrent_replication_jobs")]
     pub max_concurrent_replication_jobs: NonZeroUsize,
+    #[serde(default = "default_max_concurrent_scan_jobs")]
+    pub max_concurrent_scan_jobs: NonZeroUsize,
     #[serde(default = "default_max_manifest_size")]
     pub max_manifest_size: ByteSize,
     #[serde(default = "default_max_blob_size")]
@@ -68,6 +73,9 @@ pub struct GlobalConfig {
     pub event_webhooks: Vec<String>,
     #[serde(default)]
     pub job_queue: Option<JobQueueConfig>,
+    /// The scanner service pushes to `scan = true` repositories are sent to.
+    #[serde(default)]
+    pub scan: Option<ScanConfig>,
     /// Seconds to keep draining in-flight work on shutdown before forcing exit.
     /// Align this with the orchestrator's termination grace period.
     #[serde(default = "default_shutdown_drain_secs")]
@@ -119,6 +127,10 @@ fn default_max_concurrent_cache_jobs() -> NonZeroUsize {
     DEFAULT_MAX_CONCURRENT_CACHE_JOBS
 }
 
+fn default_max_concurrent_scan_jobs() -> NonZeroUsize {
+    DEFAULT_MAX_CONCURRENT_SCAN_JOBS
+}
+
 fn default_max_concurrent_replication_jobs() -> NonZeroUsize {
     DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS
 }
@@ -153,6 +165,7 @@ impl Default for GlobalConfig {
             max_concurrent_requests: default_max_concurrent_requests(),
             max_concurrent_cache_jobs: default_max_concurrent_cache_jobs(),
             max_concurrent_replication_jobs: default_max_concurrent_replication_jobs(),
+            max_concurrent_scan_jobs: default_max_concurrent_scan_jobs(),
             max_manifest_size: default_max_manifest_size(),
             max_blob_size: default_max_blob_size(),
             blob_stream_frame_size: default_blob_stream_frame_size(),
@@ -167,6 +180,7 @@ impl Default for GlobalConfig {
             authorization_webhook: None,
             event_webhooks: Vec::new(),
             job_queue: None,
+            scan: None,
             shutdown_drain_secs: default_shutdown_drain_secs(),
             namespace_walk_concurrency: default_namespace_walk_concurrency(),
             gc_grace_secs: default_gc_grace_secs(),

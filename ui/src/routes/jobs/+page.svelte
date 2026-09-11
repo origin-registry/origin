@@ -146,6 +146,9 @@
 		>
 			replication
 		</button>
+		<button class:active={queue === 'scan'} onclick={() => selectQueue('scan')} disabled={loading}>
+			scan
+		</button>
 	</div>
 	<button class="refresh" onclick={refresh} disabled={loading}>
 		{loading ? 'Refreshing…' : 'Refresh'}

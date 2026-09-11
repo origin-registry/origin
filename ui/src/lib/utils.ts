@@ -1,12 +1,17 @@
 import { base } from '$app/paths';
 import type { ManifestEntry, Platform, Manifest, Descriptor, ReferrerInfo } from './api';
 
-export type AttestationType = 'slsa' | 'sbom' | 'signature' | 'artifact';
+export type AttestationType = 'slsa' | 'sbom' | 'signature' | 'vuln' | 'artifact';
 
 export interface TreeNode {
 	manifest: ManifestEntry;
 	children: { manifest: ManifestEntry; platform?: Platform }[];
-	attestations: { digest: string; type: AttestationType; artifactType?: string }[];
+	attestations: {
+		digest: string;
+		type: AttestationType;
+		artifactType?: string;
+		annotations?: Record<string, string>;
+	}[];
 }
 
 export type TreeRowKind = 'root' | 'child' | 'attestation' | 'referrer';
@@ -22,6 +27,8 @@ export interface TreeRowNode {
 	platform?: Platform;
 	/** Attestation badge for the second column (attestation/referrer rows). */
 	attestationType?: AttestationType;
+	/** The referrer's annotations, carrying a scan summary when it is a report. */
+	annotations?: Record<string, string>;
 	pushed_at?: string;
 	last_pulled_at?: string;
 	/** Whether pushed/pulled columns show timestamps (true for root/child rows). */
@@ -56,6 +63,7 @@ export function buildTreeRows(tree: TreeNode[]): TreeRowNode[] {
 					hasNext: false,
 					tags: [],
 					attestationType: getAttestationType(referrer),
+					annotations: referrer.annotations,
 					showDates: false,
 					canExpand: false,
 					children: []
@@ -69,6 +77,7 @@ export function buildTreeRows(tree: TreeNode[]): TreeRowNode[] {
 				hasNext: false,
 				tags: [],
 				attestationType: att.type,
+				annotations: att.annotations,
 				showDates: false,
 				canExpand: false,
 				children: []
@@ -129,16 +138,29 @@ const SBOM_PREDICATE_TYPES = new Set([
 	'https://cyclonedx.org/bom',
 ]);
 
+const VULN_ARTIFACT_TYPES = new Set([
+	'application/sarif+json',
+]);
+
+const VULN_PREDICATE_TYPES = new Set([
+	'https://cosign.sigstore.dev/attestation/vuln/v1',
+	'https://in-toto.io/attestation/vulns/v0.1',
+	'https://in-toto.io/attestation/vulns/v0.2',
+]);
+
 export function getAttestationType(referrer: ReferrerInfo): AttestationType {
 	const artifactType = referrer.artifactType ?? '';
 	const predicateType = referrer.annotations?.['in-toto.io/predicate-type'] ?? '';
 
+	// The predicate names the content; the artifact type may only name the envelope.
+	if (SLSA_PREDICATE_TYPES.has(predicateType)) return 'slsa';
+	if (SBOM_PREDICATE_TYPES.has(predicateType)) return 'sbom';
+	if (VULN_PREDICATE_TYPES.has(predicateType)) return 'vuln';
+
 	if (SLSA_ARTIFACT_TYPES.has(artifactType)) return 'slsa';
 	if (SBOM_ARTIFACT_TYPES.has(artifactType)) return 'sbom';
 	if (SIGNATURE_ARTIFACT_TYPES.has(artifactType)) return 'signature';
-
-	if (SLSA_PREDICATE_TYPES.has(predicateType)) return 'slsa';
-	if (SBOM_PREDICATE_TYPES.has(predicateType)) return 'sbom';
+	if (VULN_ARTIFACT_TYPES.has(artifactType)) return 'vuln';
 
 	return 'artifact';
 }
@@ -155,6 +177,11 @@ export function pathUrl(path: string): string {
 export function manifestUrl(path: string, reference: string): string {
 	const separator = reference.startsWith('sha256:') || reference.startsWith('sha512:') ? '@' : ':';
 	return `${base}/${path}${separator}${reference}`;
+}
+
+/** The page rendering the vulnerability report stored at `digest`. */
+export function scanUrl(path: string, digest: string): string {
+	return `${base}/scan/${path}@${digest}`;
 }
 
 export function digestConfirmKey(digest: string): string {
@@ -249,7 +276,7 @@ export function buildTree(manifests: ManifestEntry[]): TreeNode[] {
 	const childDigests = new Set<string>();
 	const referrerDigests = new Set<string>();
 	const parentToChildren = new Map<string, { manifest: ManifestEntry; platform?: Platform }[]>();
-	const manifestToAttestations = new Map<string, { digest: string; type: AttestationType; artifactType?: string }[]>();
+	const manifestToAttestations = new Map<string, TreeNode['attestations']>();
 
 	for (const m of manifests) {
 		// Skip a self-reference: a manifest that lists itself as a parent or
@@ -266,13 +293,14 @@ export function buildTree(manifests: ManifestEntry[]): TreeNode[] {
 
 		const referrers = (m.referrers ?? []).filter((referrer) => referrer.digest !== m.digest);
 		if (referrers.length > 0) {
-			const attestations: { digest: string; type: AttestationType; artifactType?: string }[] = [];
+			const attestations: TreeNode['attestations'] = [];
 			for (const referrer of referrers) {
 				referrerDigests.add(referrer.digest);
 				attestations.push({
 					digest: referrer.digest,
 					type: getAttestationType(referrer),
 					artifactType: referrer.artifactType,
+					annotations: referrer.annotations,
 				});
 			}
 			manifestToAttestations.set(m.digest, attestations);
@@ -387,4 +415,151 @@ export function resolveRepository(names: string[], path: string): string | null 
 		}
 	}
 	return owner;
+}
+
+// ---- Vulnerability reports ----
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+export const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low', 'unknown'];
+
+export interface ScanSummary {
+	scanner?: string;
+	counts: Record<Severity, number>;
+	total: number;
+}
+
+/** The `io.angos.scan.*` annotations the scan handler writes on a report. */
+export function parseScanSummary(annotations?: Record<string, string>): ScanSummary | null {
+	if (!annotations) return null;
+	const counts = {} as Record<Severity, number>;
+	let present = false;
+	for (const severity of SEVERITIES) {
+		const value = annotations[`io.angos.scan.${severity}`];
+		if (value !== undefined) present = true;
+		counts[severity] = Number(value ?? 0) || 0;
+	}
+	if (!present) return null;
+	const total = SEVERITIES.reduce((sum, severity) => sum + counts[severity], 0);
+	return { scanner: annotations['io.angos.scan.scanner'], counts, total };
+}
+
+export interface Finding {
+	id: string;
+	severity: Severity;
+	pkg?: string;
+	installed?: string;
+	fixed?: string;
+	description: string;
+	url?: string;
+}
+
+export interface ParsedReport {
+	scanner?: string;
+	findings: Finding[];
+	summary: ScanSummary;
+}
+
+type SarifRule = {
+	id?: string;
+	shortDescription?: { text?: string };
+	fullDescription?: { text?: string };
+	helpUri?: string;
+	properties?: { 'security-severity'?: string; tags?: string[] };
+};
+type SarifResult = {
+	ruleId?: string;
+	ruleIndex?: number;
+	message?: { text?: string };
+};
+
+function severityWord(word: string): Severity | null {
+	switch (word.toLowerCase()) {
+		case 'critical':
+			return 'critical';
+		case 'high':
+			return 'high';
+		case 'medium':
+		case 'moderate':
+			return 'medium';
+		case 'low':
+		case 'negligible':
+			return 'low';
+		default:
+			return null;
+	}
+}
+
+// The scanner's own severity word when it states one (Trivy tags its rule,
+// Grype writes it into the message), else the CVSS score bucketed the way
+// GitHub code scanning does. Mirrors the registry's summary.
+function severityOf(rule: SarifRule | undefined, message: string): Severity {
+	for (const tag of rule?.properties?.tags ?? []) {
+		const word = severityWord(tag);
+		if (word) return word;
+	}
+	const stated = message.match(/(?:Severity:|\bAn?)\s+(\w+)/);
+	if (stated) {
+		const word = severityWord(stated[1]);
+		if (word) return word;
+	}
+	const score = Number(rule?.properties?.['security-severity']);
+	if (score >= 9) return 'critical';
+	if (score >= 7) return 'high';
+	if (score >= 4) return 'medium';
+	if (score > 0) return 'low';
+	return 'unknown';
+}
+
+function field(message: string, label: string): string | undefined {
+	return message.match(new RegExp(`${label}:\\s*([^\\n]*)`))?.[1]?.trim() || undefined;
+}
+
+/** A SARIF document from Trivy or Grype as a flat, sorted list of findings. */
+export function parseSarif(document: unknown): ParsedReport {
+	const run = (document as { runs?: unknown[] })?.runs?.[0] as
+		| { tool?: { driver?: { name?: string; version?: string; rules?: SarifRule[] } }; results?: SarifResult[] }
+		| undefined;
+	const driver = run?.tool?.driver;
+	const scanner = driver?.name ? `${driver.name}${driver.version ? ' ' + driver.version : ''}` : undefined;
+	const rules = driver?.rules ?? [];
+	const counts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+	const findings: Finding[] = [];
+	for (const result of run?.results ?? []) {
+		const rule =
+			(result.ruleIndex !== undefined ? rules[result.ruleIndex] : undefined) ??
+			rules.find((candidate) => candidate.id === result.ruleId);
+		const message = result.message?.text ?? '';
+		const severity = severityOf(rule, message);
+		counts[severity] += 1;
+		// Trivy lists "Package:", "Installed Version:" and "Fixed Version:";
+		// Grype says "in <kind> package: <name>, version <v>".
+		const grype = message.match(/package:\s*([^,\s]+),\s*version\s+(\S+)/i);
+		findings.push({
+			id: result.ruleId ?? rule?.id ?? '?',
+			severity,
+			pkg: field(message, 'Package') ?? grype?.[1],
+			installed: field(message, 'Installed Version') ?? grype?.[2],
+			fixed: field(message, 'Fixed Version'),
+			description:
+				rule?.shortDescription?.text ?? rule?.fullDescription?.text ?? message.split('\n')[0],
+			url: rule?.helpUri
+		});
+	}
+	const rank = (severity: Severity) => SEVERITIES.indexOf(severity);
+	findings.sort((a, b) => rank(a.severity) - rank(b.severity) || a.id.localeCompare(b.id));
+	const total = findings.length;
+	return { scanner, findings, summary: { scanner, counts, total } };
+}
+
+/** The newest vulnerability report among `referrers` that carries a summary. */
+export function latestScanReport(referrers: ReferrerInfo[]): ReferrerInfo | null {
+	const reports = referrers.filter(
+		(referrer) => getAttestationType(referrer) === 'vuln' && parseScanSummary(referrer.annotations)
+	);
+	reports.sort((a, b) =>
+		(b.annotations?.['org.opencontainers.image.created'] ?? '').localeCompare(
+			a.annotations?.['org.opencontainers.image.created'] ?? ''
+		)
+	);
+	return reports[0] ?? null;
 }

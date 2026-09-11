@@ -84,6 +84,7 @@ The complete documentation index lives in [doc/index.md](doc/index.md).
 - [Protect Tags with Immutability](doc/how-to/protect-tags-immutability.md)
 - [Configure Webhook Authorization](doc/how-to/configure-webhook-authorization.md)
 - [Configure Event Webhooks](doc/how-to/configure-event-webhooks.md)
+- [Scan Images with an External Scanner](doc/how-to/scan-images.md)
 - [Configure Replication](doc/how-to/configure-replication.md)
 - [Run Storage Maintenance](doc/how-to/run-storage-maintenance.md)
 - [Enable Durable Cache Jobs](doc/how-to/durable-cache-jobs.md)
@@ -130,11 +131,12 @@ Commands:
   argon             Hash a password following the argon2id algorithm
   prune             Enforce retention policies and reclaim aged upload-lifecycle
                     leftovers
-  replicate         Reconcile replicated namespaces with their configured
-                    downstreams
+  reconcile         Reconcile stored content with the configuration
   scrub             Walk the store, repair inconsistencies, and quarantine
                     unrecognized objects
   server            Run the registry listeners
+  scanner           Run the scanner service that answers scan jobs with SARIF
+                    reports
   worker            Process durable background jobs
 ```
 
