@@ -9,6 +9,7 @@ services:
       - "8000:8000"
     volumes:
       - ./config.toml:/config.toml
+      # The image runs as UID 65534: `chown -R 65534:65534 data` first.
       - ./data:/data
     environment:
       RUST_LOG: "info"

@@ -18,6 +18,9 @@ use crate::registry::{Error, blob_store::resumable_hasher::Hasher};
 
 const READ_FRAME_SIZE: usize = 1024 * 1024;
 
+/// The hasher fed by every forwarded byte, plus the count of those bytes.
+type HashOutcome = Result<(Hasher, u64), Error>;
+
 pub struct HashingReader<R> {
     inner: R,
     hasher: Hasher,
@@ -53,13 +56,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
 
 /// Drive a [`HashingReader`] in a background task, surfacing its bytes as a
 /// [`ByteStream`] and, through the join handle once drained, the [`Hasher`]
-/// fed by every byte. `Some(len)` reads exactly `len` bytes and errors on a
-/// short body, `None` reads to EOF; frames go over an mpsc channel, so the
-/// body never sits whole in memory.
+/// fed by every byte and the count of bytes it forwarded. `Some(len)` reads
+/// exactly `len` bytes and errors on a short body, `None` reads to EOF; frames
+/// go over an mpsc channel, so the body never sits whole in memory.
 pub fn hashing_stream<R>(
     reader: HashingReader<R>,
     content_length: Option<u64>,
-) -> (ByteStream, JoinHandle<Result<Hasher, Error>>)
+) -> (ByteStream, JoinHandle<HashOutcome>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -105,7 +108,7 @@ where
             }
         }
         drop(tx);
-        Ok(reader.into_hasher())
+        Ok((reader.into_hasher(), sent))
     });
 
     let body: ByteStream = Box::pin(stream::unfold(rx, |mut rx| async move {

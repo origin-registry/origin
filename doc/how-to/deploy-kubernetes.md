@@ -207,6 +207,16 @@ spec:
             secretName: registry-config
 ```
 
+The image runs as UID 65534. The S3 deployment above writes nothing locally,
+but a pod that mounts a PersistentVolume for `[blob_store.fs]` must make it
+writable to that user with a pod-level `securityContext`:
+
+```yaml
+    spec:
+      securityContext:
+        fsGroup: 65534
+```
+
 ### Step 4: Create Service
 
 ```yaml

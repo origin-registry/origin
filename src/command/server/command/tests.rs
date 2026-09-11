@@ -221,10 +221,13 @@ async fn test_build_registry_components_integration() {
     let registry = Registry::new(blob_backend, metadata_store, repositories, registry_config);
 
     let response = registry
-        .list_catalog_entries(ListCatalogRequest {
-            n: None,
-            last: None,
-        })
+        .list_catalog_entries(
+            ListCatalogRequest {
+                n: None,
+                last: None,
+            },
+            |_| true,
+        )
         .await
         .unwrap();
     let body = response_json(response).await;

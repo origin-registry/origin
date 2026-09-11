@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.3 - UNRELEASED
+
+### Changed
+
+- The container image runs as UID 65534 instead of root, so a bind-mounted data directory must be owned by that user and a mounted private key readable by it; see the upgrade guide.
+
+### Fixed
+
+- An upload whose earlier chunk wrote bytes it never checkpointed is now failed closed when the next chunk lands, instead of promoting a blob longer than its digest covers.
+- The HTTP header-read timeout is now armed, so a client that dribbles request headers is dropped after 30 seconds instead of holding a connection for the whole `query_timeout`; an idle keep-alive is closed after the same 30 seconds.
+- A configuration reload now reaches an already-open keep-alive connection, so a revoked credential or a tightened policy applies to its next request instead of only after it closes.
+- A forwarded client IP is honored only when it parses as an address and is recorded in canonical form, and a proxy connecting over a dual-stack socket as an IPv4-mapped IPv6 address is now matched against IPv4 `trusted_proxies` entries.
+- The request scheme a trusted proxy forwards through `X-Forwarded-Proto` is resolved once, so the bearer-token realm and the authorization webhook no longer disagree about whether a request arrived over HTTPS.
+- The pull-through and replication client refuses an upload `Location` or a pagination `Link` that points to a different origin than the response, and will not send credentials to a non-HTTPS token endpoint for an HTTPS registry, so a hostile upstream cannot harvest them.
+- The embedded web UI is served with `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`, so the session-bearing HTML cannot be sniffed or framed.
+- A CEL policy rule that errors on evaluated identity or request data no longer copies that value into the log or the denial reason; only the failing operator or method is recorded.
+- The `/readyz` probe answers a failing backend with `storage backend not ready` and logs the cause, rather than returning the storage error, which named the bucket and endpoint, to an anonymous caller.
+- `/v2/_catalog` now hides a repository the caller may not list: each entry is filtered by the global and the covering repository's access policy, per page. Callers must follow the `Link` header, since a filtered page may hold fewer than `n` names.
+
 ## 1.7.2
 
 ### Added

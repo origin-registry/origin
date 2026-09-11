@@ -635,7 +635,15 @@ impl RegistryClient {
     fn parse_next_link(response: &Response) -> Option<String> {
         let header = response.headers().get(LINK)?.to_str().ok()?;
         let target = client::next_page_target(header)?;
-        response.url().join(target).ok().map(|u| u.to_string())
+        let base = response.url();
+        let joined = base.join(target).ok()?;
+        // A cross-origin next link would send the paging request, and its auth,
+        // to a host the upstream chose; stop paging rather than follow it.
+        if joined.origin() != base.origin() {
+            warn!("refusing cross-origin pagination Link '{joined}' from {base}");
+            return None;
+        }
+        Some(joined.to_string())
     }
 
     /// Streams a blob from the upstream registry, optionally under `range` (a

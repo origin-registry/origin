@@ -3,11 +3,12 @@ use std::{
     time::Instant,
 };
 
+use arc_swap::ArcSwap;
 use hyper::{
     Method, Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
     service::service_fn,
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use opentelemetry::trace::TraceContextExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -45,7 +46,7 @@ type DispatchFuture =
 /// they only stop the keepalive from taking another request.
 pub async fn serve_request<S>(
     stream: TokioIo<S>,
-    context: Arc<ServerContext>,
+    context: Arc<ArcSwap<ServerContext>>,
     peer_certificate: Option<Vec<u8>>,
     timeouts: Arc<RequestTimeouts>,
     remote_address: SocketAddr,
@@ -54,15 +55,21 @@ pub async fn serve_request<S>(
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
-    let conn = http1::Builder::new().serve_connection(
-        stream,
-        service_fn(move |mut request| {
-            inject_peer_certificate(&mut request, peer_certificate.as_deref());
-            request.extensions_mut().insert(remote_address);
-            request.extensions_mut().insert(scheme);
-            handle_request(Arc::clone(&context), request)
-        }),
-    );
+    // A timer arms hyper's 30-second `header_read_timeout`, which is inert with
+    // no timer installed: a client dribbling one header byte at a time would
+    // otherwise hold the connection for the whole `query_timeout`. It also
+    // closes an idle keep-alive after the same 30 seconds.
+    let conn = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .serve_connection(
+            stream,
+            service_fn(move |mut request| {
+                inject_peer_certificate(&mut request, peer_certificate.as_deref());
+                request.extensions_mut().insert(remote_address);
+                request.extensions_mut().insert(scheme);
+                handle_request(context.load_full(), request)
+            }),
+        );
     pin!(conn);
 
     let _in_flight_guard = InFlightGuard::new();
@@ -111,11 +118,17 @@ pub async fn serve_request<S>(
 #[instrument(skip(context, request))]
 async fn handle_request(
     context: Arc<ServerContext>,
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
+
+    // Resolve the client's scheme once, honouring a trusted proxy's
+    // `X-Forwarded-Proto`, and overwrite the listener's raw scheme. The bearer
+    // realm and the auth webhook both read this one extension.
+    let scheme = context.resolve_scheme(&request);
+    request.extensions_mut().insert(scheme);
     let mut action = router::parse(request.method(), request.uri());
     // A mirroring client names the registry it believes it is addressing in
     // `?ns=`; serving it from the repository mirroring that namespace is what

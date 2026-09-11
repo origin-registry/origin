@@ -377,6 +377,14 @@ async fn complete_upload_rejects_size_divergence() {
     .await;
 }
 
+#[tokio::test]
+async fn append_fails_closed_on_size_divergence() {
+    for_each_backend(async |tc| {
+        test_append_fails_closed_on_size_divergence(tc.blob_store().as_ref()).await;
+    })
+    .await;
+}
+
 /// An append that fails after durably writing bytes leaves the staging object
 /// longer than the checkpoint records, and the resume that follows hashes only
 /// its own bytes, so the digest matches while the stored bytes do not.
@@ -421,6 +429,56 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     assert!(
         matches!(store.read(&digest).await, Err(Error::BlobUnknown)),
         "the diverged bytes must never reach the canonical blob path"
+    );
+}
+
+/// A write that durably stores bytes it never checkpoints leaves the staging
+/// object longer than the session hashed. The next append must catch the
+/// surplus and fail the session closed, never carry it to the promoting PUT.
+pub async fn test_append_fails_closed_on_size_divergence(store: &BlobStore) {
+    let namespace = &Namespace::new("test/append-divergence").unwrap();
+    let session_id = &UploadSessionId::generate();
+    store
+        .create_upload(namespace, session_id, None)
+        .await
+        .unwrap();
+    store
+        .append_upload(
+            namespace,
+            session_id,
+            Box::new(Cursor::new(b"hashed prefix".to_vec())),
+            Some(13),
+        )
+        .await
+        .unwrap();
+
+    // A tail the session never hashed, planted straight into the staging object.
+    let upload_key = namespace.upload_path(session_id);
+    store
+        .object
+        .write_upload(&upload_key, frame(b"orphaned tail".to_vec()), Some(13))
+        .await
+        .unwrap();
+
+    let outcome = store
+        .append_upload(
+            namespace,
+            session_id,
+            Box::new(Cursor::new(b"more".to_vec())),
+            Some(4),
+        )
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(outcome, Err(Error::DigestInvalid)),
+        "an append over an orphaned tail must fail closed: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            store.upload_summary(namespace, session_id).await,
+            Err(Error::BlobUploadUnknown)
+        ),
+        "the failed session must be gone"
     );
 }
 

@@ -81,12 +81,58 @@ pub fn evaluate_rules(rules: &[CelRule], context: &Context) -> RuleOutcome {
             Err(e) => {
                 return RuleOutcome::Indeterminate {
                     index: rule_index,
-                    message: e.to_string(),
+                    message: sanitize_execution_error(&e),
                 };
             }
         }
     }
     RuleOutcome::NoMatch
+}
+
+/// A log-safe rendering of a CEL execution error. The interpreter's `Display`
+/// prints evaluated operands with `{:?}` for its value-carrying variants, so a
+/// rule run against attacker-controlled identity or request data could write
+/// that data into the log. Only variants whose message is an identifier, type
+/// name or count keep the interpreter text; the rest are reduced to the
+/// operator or method that failed.
+fn sanitize_execution_error(error: &ExecutionError) -> String {
+    match error {
+        ExecutionError::InvalidArgumentCount { .. }
+        | ExecutionError::UnexpectedType { .. }
+        | ExecutionError::NoSuchKey(_)
+        | ExecutionError::UndeclaredReference(_)
+        | ExecutionError::MissingArgumentOrTarget => error.to_string(),
+        ExecutionError::UnsupportedTargetType { .. } => "invalid argument type".to_string(),
+        ExecutionError::NotSupportedAsMethod { method, .. } => {
+            format!("method '{method}' not supported on the target type")
+        }
+        ExecutionError::UnsupportedKeyType(_) => "unsupported map key type".to_string(),
+        ExecutionError::ValuesNotComparable(..) => "values are not comparable".to_string(),
+        ExecutionError::UnsupportedUnaryOperator(op, _) => {
+            format!("unsupported unary operator '{op}'")
+        }
+        ExecutionError::UnsupportedBinaryOperator(op, ..) => {
+            format!("unsupported binary operator '{op}'")
+        }
+        ExecutionError::UnsupportedMapIndex(_) => "unsupported map index type".to_string(),
+        ExecutionError::UnsupportedListIndex(_) => "unsupported list index type".to_string(),
+        ExecutionError::UnsupportedIndex(..) => "unsupported index type".to_string(),
+        ExecutionError::UnsupportedFunctionCallIdentifierType(_) => {
+            "unsupported function call identifier".to_string()
+        }
+        ExecutionError::UnsupportedFieldsConstruction(_) => {
+            "unsupported fields construction".to_string()
+        }
+        ExecutionError::FunctionError { function, .. } => {
+            format!("error executing function '{function}'")
+        }
+        ExecutionError::DivisionByZero(_) => "division by zero".to_string(),
+        ExecutionError::RemainderByZero(_) => "remainder by zero".to_string(),
+        ExecutionError::Overflow(op, ..) => format!("overflow from binary operator '{op}'"),
+        // `ExecutionError` is `#[non_exhaustive]`; a future variant might embed
+        // a value, so it is not rendered.
+        _ => "rule evaluation failed".to_string(),
+    }
 }
 
 impl<'de> Deserialize<'de> for CelRule {
@@ -101,9 +147,30 @@ impl<'de> Deserialize<'de> for CelRule {
 
 #[cfg(test)]
 mod tests {
+    use cel_interpreter::Context;
     use serde::de::DeserializeOwned;
 
-    use crate::policy::{AccessPolicyConfig, CelRule, RetentionPolicyConfig};
+    use crate::policy::cel_rule::{CelRule, RuleOutcome, evaluate_rules};
+    use crate::policy::{AccessPolicyConfig, RetentionPolicyConfig};
+
+    /// A value-carrying execution error must not copy the evaluated operand
+    /// into the message, or a client controls what the registry logs.
+    #[test]
+    fn an_execution_error_never_logs_the_evaluated_value() {
+        let secret = "SENSITIVE_CLAIM_VALUE";
+        let mut context = Context::default();
+        context.add_variable("secret", secret).unwrap();
+
+        // A string compared to a list is not comparable at run time.
+        let rules = [CelRule::compile("secret < ['x']").unwrap()];
+        let RuleOutcome::Indeterminate { message, .. } = evaluate_rules(&rules, &context) else {
+            panic!("an incomparable comparison must be indeterminate");
+        };
+        assert!(
+            !message.contains(secret),
+            "the evaluated value leaked into the message: {message}"
+        );
+    }
 
     #[test]
     fn invalid_cel_rule_fails_compile() {

@@ -1,16 +1,17 @@
 //! The endpoints the registry does not serve: token exchange, the embedded web
 //! UI, and the operational probes. Everything OCI answers from `registry`.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Display};
 
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
     HeaderMap, Response, StatusCode,
-    header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
+    header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
 };
 use rust_embed::Embed;
 use serde::Serialize;
+use tracing::warn;
 
 use crate::{
     auth::TokenIssuer,
@@ -105,6 +106,10 @@ pub fn handle_ui_asset(path: &str) -> Result<Response<ResponseBody>, Error> {
 fn asset_response(mime: &str, data: Cow<'static, [u8]>) -> Result<Response<ResponseBody>, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::try_from(mime)?);
+    // The SPA fallback answers any unknown path with the session-bearing HTML,
+    // so pin its content type and forbid framing it.
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
     Ok(build_response(
         StatusCode::OK,
@@ -132,8 +137,9 @@ pub fn handle_healthz() -> Result<Response<ResponseBody>, Error> {
     json_response(StatusCode::OK, &body)
 }
 
-/// A backend that cannot be listed is reported as `503 not_ready` rather than
-/// as an error, so the probe body carries the reason.
+/// A backend that cannot be listed is reported as `503 not_ready`. The cause
+/// is logged, not returned: `/readyz` is exposed anonymously, and a storage
+/// error names the bucket and endpoint.
 pub async fn handle_readyz(registry: &Registry) -> Result<Response<ResponseBody>, Error> {
     let (status, body) = match registry.check_ready().await {
         Ok(()) => (
@@ -143,16 +149,20 @@ pub async fn handle_readyz(registry: &Registry) -> Result<Response<ResponseBody>
                 error: None,
             },
         ),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusBody {
-                status: "not_ready",
-                error: Some(error.to_string()),
-            },
-        ),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, not_ready_body(&error)),
     };
 
     json_response(status, &body)
+}
+
+/// The `not_ready` body. The cause is logged, never returned: a storage error
+/// names the bucket and endpoint, and `/readyz` is exposed anonymously.
+fn not_ready_body(error: &impl Display) -> StatusBody {
+    warn!("readiness probe failed: {error}");
+    StatusBody {
+        status: "not_ready",
+        error: Some("storage backend not ready".to_string()),
+    }
 }
 
 pub fn handle_metrics() -> Result<Response<ResponseBody>, Error> {
@@ -173,7 +183,7 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::asset_bytes;
+    use super::{asset_bytes, asset_response, not_ready_body};
 
     /// The embedded (release) shape: every request must share the one `'static`
     /// copy rather than allocating its own, which pointer identity is the only
@@ -206,5 +216,29 @@ mod tests {
             address,
             "an asset read from disk must be handed over, not copied"
         );
+    }
+
+    /// `/readyz` is exposed anonymously, so its body must not relay the storage
+    /// error, which names the bucket and endpoint.
+    #[test]
+    fn not_ready_body_hides_the_backend_error() {
+        let leaky = "list failed: endpoint=http://s3.internal:9000 bucket=secret-bucket";
+        let body = not_ready_body(&leaky);
+        assert_eq!(body.status, "not_ready");
+        assert_eq!(body.error.as_deref(), Some("storage backend not ready"));
+    }
+
+    /// The SPA HTML holds the registry session, so it must carry the sniffing
+    /// and framing guards on every asset response.
+    #[test]
+    fn asset_response_carries_security_headers() {
+        let response = asset_response(
+            "text/html; charset=utf-8",
+            Cow::Borrowed(b"<!doctype html>"),
+        )
+        .unwrap();
+        let headers = response.headers();
+        assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
+        assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
     }
 }

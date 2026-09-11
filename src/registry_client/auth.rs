@@ -126,6 +126,14 @@ fn challenge_params(mut params: &str) -> Vec<(String, String)> {
     pairs
 }
 
+/// Whether a token endpoint may receive this registry's credentials: an https
+/// registry must not be downgraded onto an http endpoint, but a cross-host
+/// https realm is fine.
+fn realm_scheme_ok(registry_url: &str, token_url: &Url) -> bool {
+    let registry_https = Url::parse(registry_url).is_ok_and(|url| url.scheme() == "https");
+    !registry_https || token_url.scheme() == "https"
+}
+
 fn parse_bearer_challenge(header: &str) -> Option<BearerChallenge> {
     let mut realm: Option<String> = None;
     let mut other: Vec<(String, String)> = Vec::new();
@@ -185,7 +193,16 @@ impl RegistryClient {
         response_url: &Url,
         cache_key: &str,
     ) -> Result<String, Error> {
-        let mut req = self.client.get(challenge.token_url()?);
+        let token_url = challenge.token_url()?;
+        // A realm must not downgrade transport: an https registry's credentials
+        // may go only to an https token endpoint, while a cross-host https
+        // realm (Docker Hub's `auth.docker.io`) stays allowed.
+        if !realm_scheme_ok(&self.url, &token_url) {
+            return Err(Error::Denied(format!(
+                "refusing to send credentials to non-https token endpoint '{token_url}' for an https registry"
+            )));
+        }
+        let mut req = self.client.get(token_url);
         if self.basic_auth.is_some() {
             req = req.header(AUTHORIZATION, self.build_basic_auth_header()?);
         }
@@ -246,8 +263,8 @@ mod tests {
         registry_client::{
             Error,
             auth::{
-                BearerToken, authority_for_cache_key, parse_bearer_challenge, token_cache_key,
-                token_index_cache_key,
+                BearerToken, authority_for_cache_key, parse_bearer_challenge, realm_scheme_ok,
+                token_cache_key, token_index_cache_key,
             },
         },
         secret::Secret,
@@ -419,6 +436,24 @@ mod tests {
         .unwrap();
 
         assert_ne!(foo, bar);
+    }
+
+    #[test]
+    fn realm_scheme_ok_rejects_http_realm_for_https_registry() {
+        let token = Url::parse("http://auth.example.com/token").unwrap();
+        assert!(!realm_scheme_ok("https://registry.example.com", &token));
+    }
+
+    #[test]
+    fn realm_scheme_ok_allows_cross_host_https_realm() {
+        let token = Url::parse("https://auth.docker.io/token").unwrap();
+        assert!(realm_scheme_ok("https://registry-1.docker.io", &token));
+    }
+
+    #[test]
+    fn realm_scheme_ok_allows_http_realm_for_http_registry() {
+        let token = Url::parse("http://auth.example.com/token").unwrap();
+        assert!(realm_scheme_ok("http://registry.example.com", &token));
     }
 
     #[test]

@@ -370,7 +370,9 @@ jobs:
 
       - name: E2E - push and pull a Hub image
         run: |
-          docker run -d --network host --name angos-push \
+          # The image runs as UID 65534 and the fs variants' relative root
+          # resolves under /, so each instance gets a writable tmpfs there.
+          docker run -d --network host --name angos-push --tmpfs /conformance \
             -v "/tmp/e2e-push.toml:/config.toml" \
             ${CONFORMANCE_IMAGE_NAME} server
 
@@ -484,7 +486,7 @@ jobs:
 
       - name: E2E - pull through the cache from Docker Hub
         run: |
-          docker run -d --network host --name angos-cache \
+          docker run -d --network host --name angos-cache --tmpfs /conformance \
             -v "/tmp/e2e-cache.toml:/config.toml" \
             ${CONFORMANCE_IMAGE_NAME} server
 
@@ -508,10 +510,10 @@ jobs:
 
       - name: E2E - replicate a push from instance A to instance B
         run: |
-          docker run -d --network host --name angos-repl-b \
+          docker run -d --network host --name angos-repl-b --tmpfs /conformance \
             -v "/tmp/e2e-replication-b.toml:/config.toml" \
             ${CONFORMANCE_IMAGE_NAME} server
-          docker run -d --network host --name angos-repl-a \
+          docker run -d --network host --name angos-repl-a --tmpfs /conformance \
             -v "/tmp/e2e-replication-a.toml:/config.toml" \
             ${CONFORMANCE_IMAGE_NAME} server
 

@@ -268,7 +268,9 @@ async fn dispatch_route<'a>(
             })
             .await?),
         Action::ListCatalog { n, last } => Ok(registry
-            .list_catalog_entries(ListCatalogRequest { n, last })
+            .list_catalog_entries(ListCatalogRequest { n, last }, |namespace| {
+                context.catalog_lists_namespace(namespace, identity)
+            })
             .await?),
         Action::ListTags { namespace, n, last } => Ok(registry
             .list_tag_entries(ListTagsRequest { namespace, n, last })

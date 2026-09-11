@@ -276,18 +276,36 @@ impl BlobStore {
             .await;
         let hash_result = finish.await.map_err(|e| Error::Internal(e.to_string()))?;
         // A hash-task error wins over the storage error it triggered.
-        let (hasher, new_size) = match (write_result, hash_result) {
-            (Ok(size), Ok(hasher)) => (hasher, size),
+        let (backend_total, hasher, written) = match (write_result, hash_result) {
+            (Ok(size), Ok((hasher, written))) => (size, hasher, written),
             (_, Err(e)) => return Err(e),
             (Err(e), Ok(_)) => return Err(e.into()),
         };
 
+        // The staged object must be exactly what this session hashed: the
+        // checkpoint's bytes plus this call's. A surplus is an orphaned tail a
+        // write left behind after durably storing bytes it never checkpointed,
+        // so the digest would vouch for content the stored object does not
+        // hold. Fail the session closed here rather than promote it at the PUT.
+        let hashed_total = record
+            .committed_offset
+            .checked_add(written)
+            .ok_or_else(|| Error::Internal("upload size overflow".to_string()))?;
+        if backend_total != hashed_total {
+            warn!(
+                "Upload session staged {backend_total} bytes but hashed {hashed_total}, failing closed"
+            );
+            let container = namespace.upload_container_path(session_id);
+            let _ = self.object.delete_prefix(&container).await;
+            return Err(Error::DigestInvalid);
+        }
+
         record.hash_state = BASE64_STANDARD.encode(hasher.state().to_bytes()?);
-        record.committed_offset = new_size;
+        record.committed_offset = hashed_total;
         record.last_activity = Utc::now();
         self.write_session(namespace, session_id, &record).await?;
 
-        Ok((hasher, new_size))
+        Ok((hasher, hashed_total))
     }
 
     #[instrument(skip(self))]

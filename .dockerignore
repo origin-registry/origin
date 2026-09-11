@@ -1,0 +1,14 @@
+# The whole context is sent to the daemon; keep the build cache and VCS out.
+target
+.git
+
+# The UI's dependencies and build output are produced inside the image. A host
+# copy is the wrong architecture and makes build.rs skip `npm install`.
+ui/node_modules
+ui/build
+ui/.svelte-kit
+
+# The docs site is never part of the registry image.
+website/node_modules
+website/build
+website/.docusaurus

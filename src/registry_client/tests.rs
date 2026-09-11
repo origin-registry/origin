@@ -1268,6 +1268,35 @@ async fn test_blob_upload_sequence() {
 }
 
 #[tokio::test]
+async fn start_upload_refuses_a_cross_origin_location() {
+    // A Location on another host would carry the upload's auth off-registry.
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/test/blobs/uploads/"))
+        .respond_with(ResponseTemplate::new(202).insert_header(
+            "Location",
+            "https://evil.example/v2/test/blobs/uploads/session-1",
+        ))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server);
+    let outcome = client
+        .start_upload(StartUploadRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest_algorithm: None,
+            target: None,
+        })
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(outcome, Err(Error::Denied(_))),
+        "a cross-origin upload Location must be refused: {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_patch_upload_401_is_unauthorized_without_retry() {
     // A single-use streamed body cannot be replayed, so a 401 must not trigger
     // the refresh-and-retry path (`.expect(1)` proves a single PATCH).
@@ -2227,6 +2256,39 @@ async fn list_tags_breaks_on_cyclic_next_link() {
             Tag::new("b").unwrap(),
         ]
     );
+}
+
+#[tokio::test]
+async fn list_tags_stops_at_a_cross_origin_next_link() {
+    // A next link pointing off-host would send the paging request and its auth
+    // elsewhere; pagination must stop with the page in hand.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v2/test/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "tags": ["a", "b"] }))
+                .insert_header(
+                    "Link",
+                    "<https://evil.example/v2/test/tags/list?last=z>; rel=\"next\"",
+                ),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server);
+    let tags = client
+        .list_tags(ListTagsRequest {
+            namespace: Namespace::new("test").unwrap(),
+            n: None,
+            last: None,
+        })
+        .await
+        .expect("a cross-origin next link stops paging, it does not error");
+
+    assert_eq!(tags, vec![Tag::new("a").unwrap(), Tag::new("b").unwrap()]);
 }
 
 /// A server-assigned upload-session URL carries signed state in its query, so
