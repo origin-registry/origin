@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use toml::{
     Spanned,
     de::{DeTable, Deserializer as TomlDeserializer},
@@ -81,45 +81,30 @@ impl Configuration {
     /// Merging happens before deserialization because a file that overrides
     /// only a few keys is not a `Configuration` on its own.
     pub fn load_all<P: AsRef<Path>>(paths: &[P]) -> Result<Self, Error> {
-        let mut documents = Vec::with_capacity(paths.len());
-        for path in paths {
-            let path = path.as_ref();
-            let document = fs::read_to_string(path).map_err(|e| {
-                let path = path.display();
-                Error::NotReadable(format!("Unable to read configuration file {path}: {e}"))
-            })?;
-            documents.push(document);
+        let documents = read_documents(paths)?;
+        if let [single] = documents.as_slice() {
+            return Self::load_from_str(single);
         }
-
-        match documents.as_slice() {
-            [] => Err(Error::NotReadable(
-                "No configuration file was provided".to_string(),
-            )),
-            [single] => Self::load_from_str(single),
-            _ => Self::merge_documents(paths, &documents),
-        }
-    }
-
-    fn merge_documents<P: AsRef<Path>>(paths: &[P], documents: &[String]) -> Result<Self, Error> {
-        let mut merged: Option<Spanned<DeTable<'_>>> = None;
-        for (path, document) in paths.iter().zip(documents) {
-            let table = DeTable::parse(document)
-                .map_err(|e| Error::InvalidFormat(format!("{}: {e}", path.as_ref().display())))?;
-            match &mut merged {
-                Some(base) => merge::merge(base.get_mut(), table.into_inner()),
-                None => merged = Some(table),
-            }
-        }
-
-        let Some(table) = merged else {
-            return Err(Error::NotReadable(
-                "No configuration file was provided".to_string(),
-            ));
-        };
-
+        let table = merged_table(paths, &documents)?;
         // A merged tree spans several documents, so quoting one of them would
         // point at the wrong file. The error then names the key path instead.
         Self::from_table(table, None).map_err(|e| annotate_sources(e, paths))
+    }
+
+    /// Deserialize the merged files as `T` alone, with no cross-section
+    /// validation: for a subcommand that reads one section on a host where
+    /// the rest of a registry's configuration does not apply.
+    pub fn load_section<T: DeserializeOwned, P: AsRef<Path>>(paths: &[P]) -> Result<T, Error> {
+        let documents = read_documents(paths)?;
+        let raw = match documents.as_slice() {
+            [single] => Some(single.as_str()),
+            _ => None,
+        };
+        let table = merged_table(paths, &documents)?;
+        deserialize_table(table, raw).map_err(|e| match raw {
+            Some(_) => e,
+            None => annotate_sources(e, paths),
+        })
     }
 
     /// Parse and resolve a TOML configuration string, returning typed errors.
@@ -132,12 +117,7 @@ impl Configuration {
     /// came from and restores the source excerpt in error messages; a tree
     /// merged from several documents has no single source and passes `None`.
     fn from_table(table: Spanned<DeTable<'_>>, raw: Option<&str>) -> Result<Self, Error> {
-        Self::deserialize(TomlDeserializer::from(table))
-            .map_err(|mut e| {
-                e.set_input(raw);
-                Error::InvalidFormat(e.to_string())
-            })?
-            .validate()
+        deserialize_table::<Self>(table, raw)?.validate()
     }
 
     fn validate(self) -> Result<Self, Error> {
@@ -152,9 +132,60 @@ impl Configuration {
         }
         validate_global(&self.global, &self.auth.webhook, &self.event_webhook)?;
         validate_blob_store(&self.blob_store)?;
-        validate_repositories(&self.repository, &self.auth.webhook, &self.event_webhook)?;
+        validate_repositories(
+            &self.repository,
+            &self.auth.webhook,
+            &self.event_webhook,
+            self.global.scan.is_some(),
+        )?;
         Ok(self)
     }
+}
+
+/// Reads every configuration file, refusing an empty list.
+fn read_documents<P: AsRef<Path>>(paths: &[P]) -> Result<Vec<String>, Error> {
+    if paths.is_empty() {
+        return Err(Error::NotReadable(
+            "No configuration file was provided".to_string(),
+        ));
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.as_ref();
+            fs::read_to_string(path).map_err(|e| {
+                let path = path.display();
+                Error::NotReadable(format!("Unable to read configuration file {path}: {e}"))
+            })
+        })
+        .collect()
+}
+
+/// Parses each document and merges them in order, later ones winning.
+fn merged_table<'a, P: AsRef<Path>>(
+    paths: &[P],
+    documents: &'a [String],
+) -> Result<Spanned<DeTable<'a>>, Error> {
+    let mut merged: Option<Spanned<DeTable<'a>>> = None;
+    for (path, document) in paths.iter().zip(documents) {
+        let table = DeTable::parse(document)
+            .map_err(|e| Error::InvalidFormat(format!("{}: {e}", path.as_ref().display())))?;
+        match &mut merged {
+            Some(base) => merge::merge(base.get_mut(), table.into_inner()),
+            None => merged = Some(table),
+        }
+    }
+    merged.ok_or_else(|| Error::NotReadable("No configuration file was provided".to_string()))
+}
+
+fn deserialize_table<T: DeserializeOwned>(
+    table: Spanned<DeTable<'_>>,
+    raw: Option<&str>,
+) -> Result<T, Error> {
+    T::deserialize(TomlDeserializer::from(table)).map_err(|mut e| {
+        e.set_input(raw);
+        Error::InvalidFormat(e.to_string())
+    })
 }
 
 /// Name the files a merged configuration was built from, since an error on a
@@ -230,8 +261,14 @@ fn validate_repositories(
     repositories: &HashMap<String, repository::Config>,
     auth_webhooks: &HashMap<String, webhook::Config>,
     event_webhooks: &HashMap<String, EventWebhookConfig>,
+    scan_configured: bool,
 ) -> Result<(), Error> {
     for (repo_name, repo) in repositories {
+        if repo.scan && !scan_configured {
+            return Err(Error::InvalidFormat(format!(
+                "repository '{repo_name}' sets scan = true but [global.scan] is not configured"
+            )));
+        }
         let context = format!("referenced in '{repo_name}' repository");
         validate_auth_webhook_ref(repo.authorization_webhook_ref(), auth_webhooks, &context)?;
         validate_event_webhook_refs(&repo.event_webhooks, event_webhooks, &context)?;

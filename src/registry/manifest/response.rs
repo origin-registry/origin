@@ -44,5 +44,8 @@ pub struct PutManifestResponse {
     /// Whether the write changed local state, per the commit's recorded
     /// prior targets; gates the replication re-dispatch.
     pub changed: bool,
+    /// A plain image manifest, the only kind a `scan = true` repository
+    /// sends to the scanner.
+    pub scan_subject: bool,
     pub headers: HeaderMap,
 }

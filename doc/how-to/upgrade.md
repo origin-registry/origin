@@ -270,7 +270,7 @@ The blob store is now pure storage with no transaction engine. The in-process jo
 
 **Who is affected:** Only deployments that run the in-process queue **and** place the blob store and metadata store on separate backends. When both share one backend (the default), the `_jobs/` location is physically unchanged and no action is required.
 
-On a split-backend deployment, drain the in-process queue before upgrading: `_jobs/` records still pending on the blob backend become invisible to the new queue after the upgrade. Cache-fill jobs re-enqueue on the next pull, but an in-flight `event-only` replication push is not re-driven by `angos replicate`, so re-push affected tags if the queue was not drained. Leftover `_jobs/`, `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` objects on the blob backend are inert and can be deleted manually.
+On a split-backend deployment, drain the in-process queue before upgrading: `_jobs/` records still pending on the blob backend become invisible to the new queue after the upgrade. Cache-fill jobs re-enqueue on the next pull, but an in-flight `event-only` replication push is not re-driven by `angos reconcile replication`, so re-push affected tags if the queue was not drained. Leftover `_jobs/`, `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` objects on the blob backend are inert and can be deleted manually.
 
 ---
 
@@ -368,7 +368,7 @@ Update every scheduled invocation before upgrading the maintenance schedule:
 | `scrub --orphan-grants 24h` | add a time-based retention rule, e.g. `image.pushed_at > now() - days(1)` |
 | `scrub --orphan-namespaces` | `prune` (always on) |
 | `scrub --replication-orphans` / `scrub --cache-orphans` | `prune` (always on) |
-| `scrub --retention` / `scrub --replicate` | `angos prune` / `angos replicate` |
+| `scrub --retention` / `scrub --replicate` | `angos prune` / `angos reconcile replication` |
 
 Then, on the upgraded version:
 
@@ -797,3 +797,16 @@ keep an untagged image out of retention. Such an image is deleted on the next
 Run `angos prune --dry-run` before the first run on the new version, and add
 a rule retaining the images that were kept only by their referrers, such as an
 age rule or a tag naming them.
+
+### `angos replicate` Is Now `angos reconcile replication` (Breaking Change)
+
+The replication reconciliation pass moved under a `reconcile` command that
+also carries the new `reconcile scan`. Its options and behaviour are
+unchanged.
+
+**Who is affected:** any cron entry, runbook or pipeline invoking
+`angos replicate`; it now fails with an unknown-subcommand error.
+
+#### Migration
+
+Replace `angos replicate` with `angos reconcile replication`.

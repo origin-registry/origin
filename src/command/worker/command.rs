@@ -24,6 +24,7 @@ use crate::{
         repository_resolver::RepositoryResolver,
     },
     replication::ReplicationJobHandler,
+    scan::{ScanConfig, ScanJobHandler},
 };
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -68,14 +69,20 @@ fn queue_concurrency(config: &Configuration, queue: Queue) -> NonZeroUsize {
     match queue {
         Queue::Replication => config.global.max_concurrent_replication_jobs,
         Queue::Cache => config.global.max_concurrent_cache_jobs,
+        Queue::Scan => config.global.max_concurrent_scan_jobs,
     }
 }
 
 /// Parses and de-duplicates `--queue` values preserving command-line order,
-/// defaulting to both queues and rejecting an unknown name.
-fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
+/// defaulting to every queue the configuration can drain and rejecting an
+/// unknown name or a scan queue with no scanner service configured.
+fn resolve_queues(requested: &[String], scan_configured: bool) -> Result<Vec<Queue>, Error> {
     if requested.is_empty() {
-        return Ok(vec![Queue::Cache, Queue::Replication]);
+        let mut queues = vec![Queue::Cache, Queue::Replication];
+        if scan_configured {
+            queues.push(Queue::Scan);
+        }
+        return Ok(queues);
     }
     let mut seen = HashSet::new();
     let mut queues = Vec::new();
@@ -83,6 +90,11 @@ fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
         let queue: Queue = name
             .parse()
             .map_err(|e| Error::JobQueue(job_store::Error::Initialization(e)))?;
+        if queue == Queue::Scan && !scan_configured {
+            return Err(Error::JobQueue(job_store::Error::Initialization(
+                "[global.scan] is required to drain the scan queue".to_string(),
+            )));
+        }
         if seen.insert(queue) {
             queues.push(queue);
         }
@@ -95,9 +107,9 @@ impl Command {
         let context = WorkerContext::build(config).await?;
 
         let mut queues = Vec::new();
-        for queue in resolve_queues(&options.queue)? {
+        for queue in resolve_queues(&options.queue, context.scan.is_some())? {
             let concurrency = queue_concurrency(config, queue);
-            let components = context.components_for(queue);
+            let components = context.components_for(queue)?;
             queues.push(QueueRunner {
                 inner: Arc::new(ArcSwap::from_pointee(components)),
                 queue,
@@ -193,9 +205,16 @@ impl ConfigNotifier for Command {
             }
         };
         for runner in &self.queues {
-            runner
-                .inner
-                .store(Arc::new(context.components_for(runner.queue)));
+            match context.components_for(runner.queue) {
+                Ok(components) => runner.inner.store(Arc::new(components)),
+                Err(e) => {
+                    error!(
+                        "Failed to rebuild the {} queue on reload: {e}",
+                        runner.queue
+                    );
+                    return false;
+                }
+            }
         }
         true
     }
@@ -214,6 +233,7 @@ struct WorkerContext {
     registry: Arc<Registry>,
     retry_policy: JobRetryPolicy,
     claim_mode: ClaimMode,
+    scan: Option<ScanConfig>,
 }
 
 impl WorkerContext {
@@ -254,12 +274,13 @@ impl WorkerContext {
             registry,
             retry_policy,
             claim_mode,
+            scan: config.global.scan.clone(),
         })
     }
 
     /// A fresh `JobStore` consumer over the shared storage, plus the handler
     /// bound to `queue`.
-    fn components_for(&self, queue: Queue) -> Components {
+    fn components_for(&self, queue: Queue) -> Result<Components, Error> {
         let consumer = Arc::new(JobStore::with_retry_policy(
             self.metadata_store.object_store().clone(),
             Uuid::new_v4().to_string(),
@@ -278,13 +299,29 @@ impl WorkerContext {
                 self.metadata_store.clone(),
                 self.registry.event_dispatcher(),
             )),
+            Queue::Scan => {
+                let scan = self.scan.as_ref().ok_or_else(|| {
+                    Error::JobQueue(job_store::Error::Initialization(
+                        "[global.scan] is required to drain the scan queue".to_string(),
+                    ))
+                })?;
+                Arc::new(
+                    ScanJobHandler::new(
+                        self.registry.clone(),
+                        self.blob_store.clone(),
+                        self.metadata_store.clone(),
+                        scan,
+                    )
+                    .map_err(Error::JobQueue)?,
+                )
+            }
         };
 
-        Components {
+        Ok(Components {
             consumer,
             handler,
             registry: self.registry.clone(),
-        }
+        })
     }
 }
 
@@ -314,7 +351,7 @@ mod tests {
     #[test]
     fn resolve_queues_defaults_to_cache_and_replication() {
         assert_eq!(
-            resolve_queues(&[]).unwrap(),
+            resolve_queues(&[], false).unwrap(),
             vec![Queue::Cache, Queue::Replication]
         );
     }
@@ -322,11 +359,14 @@ mod tests {
     #[test]
     fn resolve_queues_dedups_preserving_command_line_order() {
         assert_eq!(
-            resolve_queues(&[
-                "replication".to_string(),
-                "cache".to_string(),
-                "replication".to_string(),
-            ])
+            resolve_queues(
+                &[
+                    "replication".to_string(),
+                    "cache".to_string(),
+                    "replication".to_string(),
+                ],
+                false,
+            )
             .unwrap(),
             vec![Queue::Replication, Queue::Cache],
             "explicit --queue order must be preserved, duplicates dropped"
@@ -334,8 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn resolve_queues_drains_scan_only_when_a_scanner_is_configured() {
+        assert_eq!(
+            resolve_queues(&[], true).unwrap(),
+            vec![Queue::Cache, Queue::Replication, Queue::Scan]
+        );
+        let Err(err) = resolve_queues(&["scan".to_string()], false) else {
+            panic!("an explicit scan queue needs a scanner service");
+        };
+        assert!(err.to_string().contains("[global.scan]"), "{err}");
+    }
+
+    #[test]
     fn resolve_queues_rejects_unknown_queue() {
-        let Err(err) = resolve_queues(&["some-other-queue".to_string()]) else {
+        let Err(err) = resolve_queues(&["some-other-queue".to_string()], false) else {
             panic!("an unknown queue must be rejected");
         };
         assert!(
@@ -377,6 +429,7 @@ mod tests {
             metadata_store,
             repositories,
             registry,
+            scan: None,
         };
         (context, dir)
     }
@@ -394,7 +447,7 @@ mod tests {
             &serde_json::json!({}),
         )
         .unwrap();
-        let replication_handler = context.components_for(Queue::Replication).handler;
+        let replication_handler = context.components_for(Queue::Replication).unwrap().handler;
         let err = replication_handler
             .execute(&cache_envelope)
             .await
@@ -416,7 +469,7 @@ mod tests {
             &serde_json::json!({}),
         )
         .unwrap();
-        let cache_handler = context.components_for(Queue::Cache).handler;
+        let cache_handler = context.components_for(Queue::Cache).unwrap().handler;
         let err = cache_handler
             .execute(&replication_envelope)
             .await
@@ -430,8 +483,8 @@ mod tests {
     #[tokio::test]
     async fn components_for_mints_a_fresh_consumer_per_call() {
         let (context, _dir) = worker_context();
-        let a = context.components_for(Queue::Cache).consumer;
-        let b = context.components_for(Queue::Replication).consumer;
+        let a = context.components_for(Queue::Cache).unwrap().consumer;
+        let b = context.components_for(Queue::Replication).unwrap().consumer;
         assert!(
             !Arc::ptr_eq(&a, &b),
             "each queue must get its own JobStore consumer"

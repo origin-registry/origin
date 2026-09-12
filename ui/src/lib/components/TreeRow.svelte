@@ -3,6 +3,7 @@
 	import TagList from './TagList.svelte';
 	import PlatformBadge from './PlatformBadge.svelte';
 	import AttestationBadge from './AttestationBadge.svelte';
+	import ScanSummary from './ScanSummary.svelte';
 	import DeleteButton from './DeleteButton.svelte';
 	import TreeRow from './TreeRow.svelte';
 
@@ -65,7 +66,10 @@
 		{:else if node.kind === 'child'}
 			<PlatformBadge platform={node.platform} />
 		{:else if node.attestationType}
-			<AttestationBadge type={node.attestationType} />
+			<span class="nowrap">
+				<AttestationBadge type={node.attestationType} />
+				<ScanSummary annotations={node.annotations} />
+			</span>
 		{/if}
 	</td>
 	<td>{#if node.showDates}{node.pushed_at ? formatTimeAgo(node.pushed_at) : '-'}{/if}</td>

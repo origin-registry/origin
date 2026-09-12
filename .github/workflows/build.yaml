@@ -109,10 +109,14 @@ jobs:
           cargo build -p conformance-gates
           cp target/debug/scrub-gates .
 
-      - name: Build the container
+      - name: Build the containers
         run: |
           docker build -t ${CONFORMANCE_IMAGE_NAME} -f Dockerfile --build-arg RELEASE_MODE=release .
-          docker save ${CONFORMANCE_IMAGE_NAME} -o conformance-image.tar
+          # The scan scenario runs the scanner images, which share the build stage.
+          for scanner in grype trivy; do
+            docker build -t ${CONFORMANCE_IMAGE_NAME}-$scanner --target scanner-$scanner --build-arg RELEASE_MODE=release .
+          done
+          docker save ${CONFORMANCE_IMAGE_NAME} ${CONFORMANCE_IMAGE_NAME}-grype ${CONFORMANCE_IMAGE_NAME}-trivy -o conformance-image.tar
 
       - name: Upload test artifacts
         uses: actions/upload-artifact@v7
@@ -138,18 +142,22 @@ jobs:
             description: filesystem backend, metadata store inherited (single store)
             config: config-fs-inherit.toml
             s3: false
+            scanner: grype
           - variant: fs-split
             description: filesystem backend with an explicit metadata store
             config: config-fs-split.toml
             s3: false
+            scanner: trivy
           - variant: s3-variable-parts
             description: s3 backend with variable multipart parts
             config: config-s3-variable-parts.toml
             s3: true
+            scanner: grype
           - variant: s3-uniform-parts
             description: s3 backend with uniform multipart parts
             config: config-s3-uniform-parts.toml
             s3: true
+            scanner: trivy
     steps:
       - uses: actions/checkout@v7
 
@@ -508,6 +516,73 @@ jobs:
 
           docker rm -f angos-cache
 
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+
+      - name: E2E - scan a push through the scan queue and the ${{ matrix.scanner }} scanner image
+        run: |
+          docker run -d --network host --name angos-scan --tmpfs /conformance \
+            -v "/tmp/backend.toml:/backend.toml" \
+            -v "$PWD/conformance/e2e/overlay-scan.toml:/overlay-scan.toml" \
+            ${CONFORMANCE_IMAGE_NAME} -c /backend.toml -c /overlay-scan.toml server
+
+          # The service reads [scanner] alone, so the overlay is its whole
+          # configuration. Grype pulls its database before listening, Trivy on
+          # the first scan.
+          docker run -d --network host --name angos-scanner -e RUST_LOG=info \
+            -v "$PWD/conformance/e2e/overlay-scan.toml:/overlay-scan.toml" \
+            ${CONFORMANCE_IMAGE_NAME}-${{ matrix.scanner }} -c /overlay-scan.toml scanner ${{ matrix.scanner }}
+          scanner_log() { docker logs angos-scanner 2>&1; }
+
+          for i in $(seq 1 150); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/v2/ && scanner_log | grep -q "listening on" && break
+            [ "$i" -eq 150 ] && { echo "angos or the scanner service did not start"; docker logs angos-scan; scanner_log; exit 1; }
+            sleep 1
+          done
+
+          # A single-platform manifest, so the one job names what the scanner scans.
+          oras cp --platform linux/amd64 docker.io/library/alpine:3.20 localhost:8000/scan/alpine:ci
+          digest=$(oras resolve localhost:8000/scan/alpine:ci)
+          referrers() { curl -s "http://127.0.0.1:8000/v2/scan/alpine/referrers/$digest"; }
+          pending() { curl -s "http://127.0.0.1:8000/v2/_angos/jobs/list?queue=scan" | jq '.jobs | length'; }
+
+          for i in $(seq 1 150); do
+            [ "$(referrers | jq '.manifests | length')" = "1" ] && break
+            [ "$i" -eq 150 ] && { echo "no report attached"; scanner_log; docker logs angos-scan; exit 1; }
+            sleep 2
+          done
+          referrers | jq -e '.manifests[0].artifactType == "application/sarif+json"' >/dev/null
+          report=$(referrers | jq -r '.manifests[0].digest')
+
+          # The report's own push is not a scan subject, and a second tag on the
+          # same image enqueues a job that finds the report and does not scan
+          # again: one scan in the service log, one report on the image.
+          oras cp --platform linux/amd64 docker.io/library/alpine:3.20 localhost:8000/scan/alpine:ci2
+          for i in $(seq 1 30); do
+            [ "$(pending)" = "0" ] && break
+            [ "$i" -eq 30 ] && { echo "the scan queue did not drain"; pending; scanner_log; exit 1; }
+            sleep 1
+          done
+          [ "$(scanner_log | grep -c 'Scanned ')" = "1" ] || { echo "expected exactly one scan"; scanner_log; exit 1; }
+          [ "$(referrers | jq '.manifests | length')" = "1" ] || { echo "expected one report"; referrers; exit 1; }
+          curl -sf -X DELETE "http://127.0.0.1:8000/v2/scan/alpine/manifests/ci2"
+
+          # Retention: the report follows its image, kept while the tag lives
+          # and reclaimed with the image once the tag is gone.
+          docker exec angos-scan /angos -c /backend.toml -c /overlay-scan.toml prune
+          [ "$(referrers | jq '.manifests | length')" = "1" ] || { echo "prune stripped the report of a tagged image"; exit 1; }
+          curl -sf -X DELETE "http://127.0.0.1:8000/v2/scan/alpine/manifests/ci"
+          docker exec angos-scan /angos -c /backend.toml -c /overlay-scan.toml prune
+          # The revision records are what prune reclaims; on an S3 store a GET by
+          # digest still redirects to the bytes until scrub sweeps them.
+          revisions=$(curl -s "http://127.0.0.1:8000/v2/scan/alpine/_angos/revisions/list" | jq -r '.manifests[].digest')
+          for d in "$digest" "$report"; do
+            echo "$revisions" | grep -q "$d" && { echo "$d still listed after its tag was pruned"; exit 1; }
+          done
+          echo "scan queue, referrer and retention OK"
+
+          docker rm -f angos-scan angos-scanner
+
       - name: E2E - replicate a push from instance A to instance B
         run: |
           docker run -d --network host --name angos-repl-b --tmpfs /conformance \
@@ -547,7 +622,7 @@ jobs:
       - name: Dump logs
         if: always()
         run: |
-          for c in conformance-${{ matrix.variant }}-backend angos-push angos-push-split angos-cache angos-repl-a angos-repl-b; do
+          for c in conformance-${{ matrix.variant }}-backend angos-push angos-push-split angos-cache angos-scan angos-repl-a angos-repl-b; do
             if docker inspect "$c" >/dev/null 2>&1; then
               echo "===== $c ====="
               docker logs "$c" || true
@@ -643,6 +718,14 @@ jobs:
         platform:
           - linux/amd64
           - linux/arm64
+        # The registry image, then the scanner images its tag suffix names.
+        image:
+          - target: final
+            suffix: ""
+          - target: scanner-grype
+            suffix: -grype
+          - target: scanner-trivy
+            suffix: -trivy
     steps:
       - name: Prepare
         run: |
@@ -671,6 +754,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           platforms: ${{ matrix.platform }}
+          target: ${{ matrix.image.target }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: RELEASE_MODE=release
           outputs: type=image,"name=${{ env.GHCR_REPO }}",push-by-digest=true,name-canonical=true,push=true
@@ -684,7 +768,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
+          name: digests-${{ matrix.image.target }}-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -693,12 +777,21 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build-container
+    strategy:
+      matrix:
+        image:
+          - target: final
+            suffix: ""
+          - target: scanner-grype
+            suffix: -grype
+          - target: scanner-trivy
+            suffix: -trivy
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.image.target }}-*
           merge-multiple: true
 
       - name: Login to GHCR
@@ -728,6 +821,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          flavor: |
+            suffix=${{ matrix.image.suffix }},onlatest=true
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
@@ -738,8 +833,9 @@ jobs:
       - name: Inspect image
         id: inspect
         run: |
-          docker buildx imagetools inspect ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.version }}
-          digest=$(docker buildx imagetools inspect "${{ env.GHCR_REPO }}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest}}' | jq -r '.digest')
+          image=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools inspect "$image"
+          digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -r '.digest')
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Sign container image with Cosign
@@ -759,6 +855,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v7
+
+      - name: Image version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Download binaries
         uses: actions/download-artifact@v8
@@ -786,7 +885,14 @@ jobs:
             ## Container Image
 
             ```
-            docker pull ${{ env.GHCR_REPO }}:${{ github.ref_name }}
+            docker pull ${{ env.GHCR_REPO }}:${{ env.VERSION }}
+            ```
+
+            The scanner service image, for `angos scanner`, with the scanner it runs:
+
+            ```
+            docker pull ${{ env.GHCR_REPO }}:${{ env.VERSION }}-grype
+            docker pull ${{ env.GHCR_REPO }}:${{ env.VERSION }}-trivy
             ```
 
             ## Standalone Binaries
@@ -820,7 +926,7 @@ jobs:
             ### Container image
 
             ```
-            cosign verify ${{ env.GHCR_REPO }}:${{ github.ref_name }} \
+            cosign verify ${{ env.GHCR_REPO }}:${{ env.VERSION }} \
               --certificate-identity-regexp="^https://github.com/${{ github.repository }}/\.github/workflows/build\.yaml@refs/tags/" \
               --certificate-oidc-issuer=https://token.actions.githubusercontent.com
             ```

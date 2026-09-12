@@ -12,11 +12,11 @@
 	let { title, count, variant = 'default', headerActions, children }: Props = $props();
 </script>
 
-<div class="card" class:warning={variant === 'warning'}>
+<section class="card" class:warning={variant === 'warning'}>
 	{#if title || headerActions}
 		<div class="card-header">
 			{#if title}
-				<h3>{title}{#if count !== undefined} &nbsp ({count}){/if}</h3>
+				<h3>{title}{#if count !== undefined}<span class="count">{count}</span>{/if}</h3>
 			{/if}
 			{#if headerActions}
 				<div class="header-actions">
@@ -26,4 +26,4 @@
 		</div>
 	{/if}
 	{@render children()}
-</div>
+</section>

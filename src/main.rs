@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use std::{fmt::Display, process::exit, sync::Arc, time::Duration};
+use std::{fmt::Display, future::Future, process::exit, sync::Arc, time::Duration};
 
 use argh::FromArgs;
 use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
-    command::{argon, bootstrap, maintenance, prune, replicate, scrub, server, worker},
+    command::{argon, bootstrap, maintenance, prune, reconcile, scanner, scrub, server, worker},
     configuration::{Configuration, ObservabilityConfig, watcher::ConfigWatcher},
     metrics_provider::initialize_metrics,
 };
@@ -34,6 +34,7 @@ mod policy;
 mod registry;
 pub mod registry_client;
 mod replication;
+mod scan;
 mod secret;
 
 #[cfg(test)]
@@ -116,9 +117,10 @@ fn config_paths(arguments: &GlobalArguments) -> Vec<String> {
 enum SubCommand {
     Argon(argon::Options),
     Prune(prune::Options),
-    Replicate(replicate::Options),
+    Reconcile(reconcile::Options),
     Scrub(scrub::Options),
     Serve(server::Options),
+    Scanner(scanner::Options),
     Worker(worker::Options),
 }
 
@@ -132,21 +134,30 @@ fn main() {
     }
 
     let cli_args: GlobalArguments = argh::from_env();
-
     let config_paths = config_paths(&cli_args);
-    let config = match Configuration::load_all(&config_paths) {
+    initialize_metrics();
+    let exit_code = match cli_args.subcommand {
+        SubCommand::Scanner(options) => scanner_main(&options, &config_paths),
+        subcommand => registry_main(subcommand, &config_paths),
+    };
+    if exit_code != 0 {
+        exit(exit_code);
+    }
+}
+
+/// Every subcommand but the scanner service runs against a registry's whole
+/// configuration, on a runtime sized by it.
+fn registry_main(subcommand: SubCommand, config_paths: &[String]) -> i32 {
+    let config = match Configuration::load_all(config_paths) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!(
                 "Failed to load configuration from {}: {e}",
                 config_paths.join(", ")
             );
-            exit(1);
+            return 1;
         }
     };
-
-    initialize_metrics();
-
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.global.max_concurrent_requests.get())
         .enable_all()
@@ -155,46 +166,87 @@ fn main() {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("Failed to create Tokio runtime: {e}");
-            exit(1);
+            return 1;
         }
     };
-    runtime.block_on(run_command(cli_args, config, config_paths));
+    let observability = config.observability.clone();
+    runtime.block_on(traced(
+        observability,
+        run_command(subcommand, config, config_paths),
+    ))
 }
 
-async fn run_command(cli_args: GlobalArguments, config: Configuration, config_paths: Vec<String>) {
-    let tracer_provider = match set_tracing(config.observability.clone()) {
+/// The scanner service runs on a scanner host, so it reads its own section
+/// and the observability settings alone, not a registry's configuration.
+fn scanner_main(options: &scanner::Options, config_paths: &[String]) -> i32 {
+    let document: scanner::Document = match Configuration::load_section(config_paths) {
+        Ok(document) => document,
+        Err(e) => {
+            eprintln!(
+                "Failed to load configuration from {}: {e}",
+                config_paths.join(", ")
+            );
+            return 1;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("Failed to create Tokio runtime: {e}");
+            return 1;
+        }
+    };
+    runtime.block_on(traced(document.observability, async {
+        report("Scanner", scanner::run(options, document.scanner).await)
+    }))
+}
+
+/// Runs `command` under the configured tracing and flushes its spans on the
+/// way out.
+async fn traced(
+    observability: Option<ObservabilityConfig>,
+    command: impl Future<Output = i32>,
+) -> i32 {
+    let tracer_provider = match set_tracing(observability) {
         Ok(p) => p,
         Err(err) => {
             eprintln!("Failed to set up tracing: {err}");
-            exit(1);
+            return 1;
         }
     };
-
-    let exit_code = match cli_args.subcommand {
-        SubCommand::Argon(_) => report("Argon", argon::run()),
-        SubCommand::Prune(prune_options) => {
-            report("Prune", prune::run(&prune_options, &config).await)
-        }
-        SubCommand::Replicate(replicate_options) => report(
-            "Replicate",
-            replicate::run(&replicate_options, &config).await,
-        ),
-        SubCommand::Scrub(scrub_options) => report("Scrub", run_scrub(scrub_options, config).await),
-        SubCommand::Serve(_) => report("Server", run_server(&config_paths, config).await),
-        SubCommand::Worker(worker_options) => report(
-            "Worker",
-            run_worker(&config_paths, worker_options, config).await,
-        ),
-    };
-
+    let exit_code = command.await;
     if let Some(provider) = tracer_provider
         && let Err(err) = provider.shutdown()
     {
         eprintln!("Failed to flush tracer provider: {err}");
     }
+    exit_code
+}
 
-    if exit_code != 0 {
-        exit(exit_code);
+async fn run_command(
+    subcommand: SubCommand,
+    config: Configuration,
+    config_paths: &[String],
+) -> i32 {
+    match subcommand {
+        SubCommand::Argon(_) => report("Argon", argon::run()),
+        SubCommand::Prune(prune_options) => {
+            report("Prune", prune::run(&prune_options, &config).await)
+        }
+        SubCommand::Reconcile(reconcile_options) => report(
+            "Reconcile",
+            reconcile::run(&reconcile_options, &config).await,
+        ),
+        SubCommand::Scrub(scrub_options) => report("Scrub", run_scrub(scrub_options, config).await),
+        SubCommand::Serve(_) => report("Server", run_server(config_paths, config).await),
+        SubCommand::Scanner(_) => 0,
+        SubCommand::Worker(worker_options) => report(
+            "Worker",
+            run_worker(config_paths, worker_options, config).await,
+        ),
     }
 }
 

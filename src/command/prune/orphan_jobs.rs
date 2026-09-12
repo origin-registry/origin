@@ -15,6 +15,7 @@ use crate::{
     jobs::{JobState, Queue},
     registry::{Repository, repository_resolver::RepositoryResolver},
     replication::ReplicationJob,
+    scan::ScanImagePayload,
 };
 
 /// Keyset page size for the pending and failed scans; pages are looped to
@@ -55,6 +56,18 @@ fn classify(
         // Such a job could still complete on drain if the blob is already
         // local, but granting a reference to a namespace removed from
         // pull-through config serves nothing.
+        Queue::Scan => {
+            let payload: ScanImagePayload = serde_json::from_value(payload)?;
+            let configured = resolver
+                .resolve(&payload.namespace)
+                .is_some_and(|repository| repository.scan);
+            Ok((!configured).then(|| {
+                format!(
+                    "namespace '{}' is not configured for scanning",
+                    payload.namespace
+                )
+            }))
+        }
         Queue::Cache => {
             let payload: CacheFetchBlobPayload = serde_json::from_value(payload)?;
             let configured = resolver
@@ -215,7 +228,7 @@ pub async fn sweep_orphan_jobs(
     sink: &dyn ActionSink,
     concurrency: usize,
 ) -> Result<(), Error> {
-    for queue in [Queue::Replication, Queue::Cache] {
+    for queue in [Queue::Replication, Queue::Cache, Queue::Scan] {
         OrphanJobChecker::new(job_store.clone(), resolver.clone(), queue, concurrency)
             .check_all(sink)
             .await?;
@@ -306,6 +319,7 @@ mod tests {
             ),
             immutable_tags: false,
             immutable_tags_exclusions: Vec::new(),
+            scan: false,
         }
     }
 

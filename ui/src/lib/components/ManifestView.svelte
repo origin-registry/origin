@@ -2,12 +2,15 @@
 	import { goto } from '$app/navigation';
 	import type { ParentRef, Manifest, ReferrerInfo } from '$lib/api';
 	import {
+		formatPlatform,
 		formatSize,
 		getTagConfirm,
 		isInteractiveTarget,
 		manifestUrl,
 		tagConfirmKey,
 		getAttestationType,
+		latestScanReport,
+		scanUrl,
 		isOrasArtifact,
 		getFileName
 	} from '$lib/utils';
@@ -20,6 +23,8 @@
 	import AnnotationList from './AnnotationList.svelte';
 	import DigestLink from './DigestLink.svelte';
 	import PullHistory from './PullHistory.svelte';
+	import ScanSummary from './ScanSummary.svelte';
+	import ScanSummaryCard from './ScanSummaryCard.svelte';
 
 	interface Props {
 		path: string;
@@ -61,6 +66,19 @@
 	}: Props = $props();
 
 	let expandedAnnotations: Set<string> = $state(new Set());
+	const latestReport = $derived(digest ? latestScanReport(childReferrers.get(digest) ?? []) : null);
+	// An index is not scanned itself; its platform manifests are, and their
+	// reports are what the index page shows.
+	const childReports = $derived(
+		(manifest.manifests ?? [])
+			.filter((m) => !m.annotations?.['vnd.docker.reference.digest'])
+			.flatMap((m) => {
+				const report = latestScanReport(childReferrers.get(m.digest) ?? []);
+				return report
+					? [{ label: formatPlatform(m.platform), annotations: report.annotations, href: scanUrl(path, report.digest) }]
+					: [];
+			})
+	);
 
 	type LayersViewMode = 'auto' | 'files' | 'layers';
 	let layersViewMode: LayersViewMode = $state('auto');
@@ -86,6 +104,7 @@
 	}
 </script>
 
+<div class="manifest-header">
 <Card title="Manifest">
 	<table>
 		<tbody>
@@ -156,6 +175,14 @@
 		</tbody>
 	</table>
 </Card>
+{#if manifest.artifactType === 'application/sarif+json' && digest}
+	<ScanSummaryCard reports={[{ annotations: manifest.annotations, href: scanUrl(path, digest) }]} />
+{:else if latestReport}
+	<ScanSummaryCard reports={[{ annotations: latestReport.annotations, href: scanUrl(path, latestReport.digest) }]} />
+{:else}
+	<ScanSummaryCard reports={childReports} />
+{/if}
+</div>
 
 <!-- Keyed on the reference so navigating to another manifest drops the
      collapsed state and the history fetched for the previous one. -->
@@ -184,7 +211,7 @@
 				</tr>
 				<tr>
 					<td class="label">Size</td>
-					<td>{formatSize(manifest.config.size)}</td>
+					<td class="nowrap">{formatSize(manifest.config.size)}</td>
 				</tr>
 				{#if manifest.config.annotations && expandedAnnotations.has('config')}
 					<AnnotationList annotations={manifest.config.annotations} />
@@ -218,7 +245,7 @@
 						<tr>
 							<td class="filename">{getFileName(layer) ?? layer.digest}</td>
 							<td>{layer.mediaType}</td>
-							<td>{formatSize(layer.size)}</td>
+							<td class="nowrap">{formatSize(layer.size)}</td>
 							<td>
 								<a class="download-link" href={getbloburl(layer.digest)} download={getFileName(layer) ?? layer.digest}>Download</a>
 							</td>
@@ -228,7 +255,7 @@
 				<tfoot>
 					<tr>
 						<td colspan="2" class="total-label">Total</td>
-						<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
+						<td class="nowrap">{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 						<td></td>
 					</tr>
 				</tfoot>
@@ -256,7 +283,7 @@
 								/>
 							</td>
 							<td>{layer.mediaType}</td>
-							<td>{formatSize(layer.size)}</td>
+							<td class="nowrap">{formatSize(layer.size)}</td>
 						</tr>
 						{#if layer.annotations && expandedAnnotations.has(`layer:${layer.digest}`)}
 							<tr class="annotations-row">
@@ -270,13 +297,14 @@
 				<tfoot>
 					<tr>
 						<td colspan="2" class="total-label">Total</td>
-						<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
+						<td class="nowrap">{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 					</tr>
 				</tfoot>
 			</table>
 		</Card>
 	{/if}
 {/if}
+
 
 {#if manifest.manifests && manifest.manifests.length > 0}
 	{@const platformManifests = manifest.manifests.filter(m => !m.annotations?.['vnd.docker.reference.digest'])}
@@ -309,7 +337,7 @@
 							<PlatformBadge platform={m.platform} />
 						</td>
 						<td>{m.mediaType}</td>
-						<td>{formatSize(m.size)}</td>
+						<td class="nowrap">{formatSize(m.size)}</td>
 					</tr>
 					{#if m.annotations && expandedAnnotations.has(`manifest:${m.digest}`)}
 						<tr class="annotations-row">
@@ -329,7 +357,10 @@
 									href={manifestUrl(path, ref.digest)}
 								/>
 							</td>
-							<td><AttestationBadge type={getAttestationType(ref)} /></td>
+							<td class="nowrap">
+								<AttestationBadge type={getAttestationType(ref)} />
+								<ScanSummary annotations={ref.annotations} />
+							</td>
 							<td></td>
 							<td></td>
 						</tr>
@@ -356,6 +387,33 @@
 		</table>
 	</Card>
 	{/if}
+{/if}
+
+{#if digest && (childReferrers.get(digest) ?? []).length > 0}
+	{@const ownReferrers = childReferrers.get(digest) ?? []}
+	<Card title="Referrers" count={ownReferrers.length}>
+		<table>
+			<thead>
+				<tr>
+					<th>Digest</th>
+					<th>Type</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each ownReferrers as ref}
+					<tr class="clickable" onclick={(e) => handleRowClick(e, ref.digest)}>
+						<td>
+							<DigestLink digest={ref.digest} href={manifestUrl(path, ref.digest)} />
+						</td>
+						<td class="nowrap">
+							<AttestationBadge type={getAttestationType(ref)} />
+							<ScanSummary annotations={ref.annotations} />
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	</Card>
 {/if}
 
 {#if referencedBy.length > 0}

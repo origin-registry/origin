@@ -2,6 +2,7 @@ use std::fmt;
 
 use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
 
+use crate::scan::ScanImagePayload;
 use crate::{
     jobs::{JobState, Queue},
     registry::{blob_store::OrphanMultipartUpload, metadata_store::LinkKind},
@@ -106,6 +107,9 @@ pub enum Action {
         tag: Tag,
         digest: Digest,
     },
+    /// Enqueue a scan of an image manifest; a forced one scans it again even
+    /// when a report already hangs off it.
+    EnqueueScan(ScanImagePayload),
     /// Enqueue a replication delete for a downstream-only tag, only on a
     /// `prune = true` downstream: absence-driven deletion would destroy an
     /// active-active peer's not-yet-replicated newer tag.
@@ -267,6 +271,14 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "enqueue replication delete of '{namespace}:{tag}' on downstream '{downstream}'"
+                )
+            }
+            Action::EnqueueScan(scan) => {
+                let forced = if scan.force { " (forced)" } else { "" };
+                write!(
+                    f,
+                    "enqueue scan of '{}@{}'{forced}",
+                    scan.namespace, scan.digest
                 )
             }
             Action::DeleteOrphanJob {

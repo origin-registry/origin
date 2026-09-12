@@ -33,6 +33,7 @@ use crate::{
         ReplicationJob, ReplicationTarget, build_envelope, build_prune_delete_envelope,
         record_reconcile_outcome,
     },
+    scan::{self, ScanImagePayload},
 };
 
 /// Internal-process name stamped on the events retention deletions emit.
@@ -519,6 +520,15 @@ impl Executor {
         self.enqueue_replication(build_envelope(&job)).await
     }
 
+    async fn enqueue_scan(&self, scan: ScanImagePayload) -> Result<(), Error> {
+        let envelope = scan::build_envelope(&scan)
+            .map_err(|e| Error::JobQueue(format!("failed to build scan envelope: {e}")))?;
+        self.job_store
+            .enqueue(envelope)
+            .await
+            .map_err(|e| Error::JobQueue(format!("failed to enqueue scan job: {e}")))
+    }
+
     async fn enqueue_replication_delete(
         &self,
         downstream: String,
@@ -707,6 +717,7 @@ impl ActionSink for Executor {
                 self.enqueue_replication_push(downstream, namespace, tag, digest)
                     .await
             }
+            Action::EnqueueScan(scan) => self.enqueue_scan(scan).await,
             Action::EnqueueReplicationDelete {
                 downstream,
                 namespace,

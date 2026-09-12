@@ -30,6 +30,9 @@
 
 <Breadcrumb items={[{ label: 'Repositories', href: `${base}/` }]} />
 
+<h1>Repositories</h1>
+<p class="lede">Every repository this registry serves.</p>
+
 {#if loading}
 	<LoadingState message="Loading repositories" />
 {:else if error}

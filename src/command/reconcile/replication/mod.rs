@@ -30,7 +30,7 @@ use crate::{
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
     subcommand,
-    name = "replicate",
+    name = "replication",
     description = "Reconcile replicated namespaces with their configured downstreams"
 )]
 pub struct Options {
@@ -118,7 +118,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         Box::new(DryRunSink)
     } else {
         // One store serves as producer (Executor enqueue) and consumer (drain).
-        let job_store = run_job_store(&metadata_store, "replicate");
+        let job_store = run_job_store(&metadata_store, "reconcile");
         drain = Some(ReplicationDrain::new(
             job_store.clone(),
             &blob_backend,

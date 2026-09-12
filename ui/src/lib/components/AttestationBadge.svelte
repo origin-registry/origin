@@ -11,6 +11,7 @@
 		slsa: 'SLSA',
 		sbom: 'SBOM',
 		signature: 'sig',
+		vuln: 'vuln',
 		artifact: 'artifact',
 	};
 </script>

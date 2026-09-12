@@ -15,16 +15,17 @@
 	}
 </script>
 
-<div class="theme-switcher">
+<div class="theme-switcher" role="group" aria-label="Theme">
 	<button
 		class:active={current === 'light'}
 		onclick={() => handleChange('light')}
 		title="Light theme"
 		aria-label="Light theme"
+		aria-pressed={current === 'light'}
 	>
-		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<circle cx="12" cy="12" r="5"/>
-			<path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			<circle cx="12" cy="12" r="4" />
+			<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
 		</svg>
 	</button>
 	<button
@@ -32,9 +33,10 @@
 		onclick={() => handleChange('dark')}
 		title="Dark theme"
 		aria-label="Dark theme"
+		aria-pressed={current === 'dark'}
 	>
-		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
 		</svg>
 	</button>
 	<button
@@ -42,53 +44,49 @@
 		onclick={() => handleChange('system')}
 		title="System theme"
 		aria-label="System theme"
+		aria-pressed={current === 'system'}
 	>
-		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<rect x="2" y="3" width="20" height="14" rx="2"/>
-			<path d="M8 21h8M12 17v4"/>
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			<rect x="2" y="3" width="20" height="14" rx="2" />
+			<path d="M8 21h8M12 17v4" />
 		</svg>
 	</button>
 </div>
 
 <style>
+	/* Three quiet icon buttons in one ring; the chosen one is tinted. */
 	.theme-switcher {
-		display: flex;
-		gap: 0;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
+		display: inline-flex;
+		flex: none;
+		border-radius: var(--radius);
+		box-shadow: var(--shadow-ring);
 		overflow: hidden;
 	}
-
 	button {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: var(--color-bg);
-		color: var(--color-text-muted);
-		border: none;
-		padding: 0.5rem;
-		cursor: pointer;
-		transition: all 0.15s ease;
-		border-right: 1px solid var(--color-border);
+		padding: 0.3rem 0.45rem;
+		border-radius: 0;
+		background: var(--surface);
+		color: var(--muted);
+		box-shadow: none;
 	}
-
-	button:last-child {
-		border-right: none;
+	button + button {
+		border-left: 1px solid var(--border);
 	}
-
-	button svg {
-		width: 16px;
-		height: 16px;
-	}
-
 	button:hover {
-		color: var(--color-text);
-		background: var(--color-surface);
+		background: var(--hover);
+		color: var(--text);
 	}
-
 	button.active {
-		color: var(--color-primary);
-		background: rgba(8, 145, 178, 0.1);
-		background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+		background: var(--hover-strong);
+		color: var(--text);
+	}
+	svg {
+		width: 0.875rem;
+		height: 0.875rem;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 </style>

@@ -369,7 +369,7 @@ Total enqueue attempts that did not land on the queue (envelope build or storage
 
 The `angos_job_queue_pending{queue="replication"}` gauge (above) reports
 replication backlog depth; the metrics below cover push outcomes, staleness,
-and `angos replicate` reconciliation. See
+and `angos reconcile replication` reconciliation. See
 [Bi-Directional Replication](../explanation/replication.md).
 
 `angos_replication_push_total` and
@@ -419,7 +419,7 @@ time() - angos_replication_last_success_timestamp_seconds
 
 ### angos_replication_reconcile_total
 
-Replication reconcile enqueues emitted by `angos replicate`, by outcome.
+Replication reconcile enqueues emitted by `angos reconcile replication`, by outcome.
 
 | Type    | Labels    |
 |---------|-----------|
@@ -428,7 +428,7 @@ Replication reconcile enqueues emitted by `angos replicate`, by outcome.
 **Labels:**
 - `outcome`: `enqueued` (a divergence was enqueued: a push, or a prune delete for a `prune = true` downstream), `failed` (the envelope build or enqueue errored), or `skipped` (a downstream HEAD probe failed, e.g. auth rejection, 5xx, or timeout, so the tag stays unreconciled this pass; a persistently non-zero `skipped` with zero `enqueued` typically means bad downstream credentials)
 
-This counter lives in the `angos replicate` process, which serves no `/metrics`
+This counter lives in the `angos reconcile replication` process, which serves no `/metrics`
 endpoint and exits when the run completes, so Prometheus cannot scrape it. The
 warn-level log lines emitted for failed and skipped tags are the operational
 signal: watch the replicate run's logs (or its exit status) rather than this

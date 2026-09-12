@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
 	import {
@@ -7,10 +7,10 @@
 		fetchFailedJobs,
 		retryJob,
 		deleteJob,
+		JOB_QUEUES,
 		type JobEntry,
 		type FailedJobEntry,
-		type JobState,
-		type JobQueue
+		type JobState
 	} from '$lib/api';
 	import { formatTimeAgo } from '$lib/utils';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -18,10 +18,13 @@
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import DeleteButton from '$lib/components/DeleteButton.svelte';
+	import type { JobsParams } from './+page';
+
+	let { data }: { data: JobsParams } = $props();
 
 	const PAGE = 100;
 
-	let queue: JobQueue = $state('cache');
+	const queue = $derived(data.queue);
 
 	let pending: JobEntry[] = $state([]);
 	let pendingNext: string | undefined = $state(undefined);
@@ -75,15 +78,11 @@
 		loading = false;
 	}
 
-	onMount(refresh);
-
-	function selectQueue(next: JobQueue): void {
-		if (next === queue) {
-			return;
-		}
-		queue = next;
-		void refresh();
-	}
+	// Loads the queue the URL names, again whenever it changes.
+	$effect(() => {
+		void data.queue;
+		untrack(() => void refresh());
+	});
 
 	async function onRetry(key: string): Promise<void> {
 		busyKey = key;
@@ -125,29 +124,21 @@
 </script>
 
 <svelte:head>
-	<title>{getRegistryName()} &gt; Jobs</title>
+	<title>{getRegistryName()} &gt; Jobs &gt; {queue}</title>
 </svelte:head>
 
-<Breadcrumb items={[{ label: 'Jobs', href: `${base}/jobs` }]} />
+<Breadcrumb items={[{ label: 'Jobs', href: `${base}/jobs` }, { label: queue }]} />
+
+<h1>Jobs</h1>
+<p class="lede">Queued and failed background work, by queue.</p>
 
 <div class="toolbar">
-	<div class="view-toggle" role="group" aria-label="Job queue">
-		<button
-			class:active={queue === 'cache'}
-			onclick={() => selectQueue('cache')}
-			disabled={loading}
-		>
-			cache
-		</button>
-		<button
-			class:active={queue === 'replication'}
-			onclick={() => selectQueue('replication')}
-			disabled={loading}
-		>
-			replication
-		</button>
-	</div>
-	<button class="refresh" onclick={refresh} disabled={loading}>
+	<nav class="view-toggle" aria-label="Job queue">
+		{#each JOB_QUEUES as name (name)}
+			<a href="{base}/jobs/{name}" aria-current={queue === name ? 'page' : undefined}>{name}</a>
+		{/each}
+	</nav>
+	<button class="secondary" onclick={refresh} disabled={loading}>
 		{loading ? 'Refreshing…' : 'Refresh'}
 	</button>
 </div>
@@ -203,7 +194,7 @@
 		</table>
 		{#if pendingNext}
 			<div class="load-more">
-				<button onclick={loadMorePending} disabled={loading || pendingMore}>Load more</button>
+				<button class="secondary" onclick={loadMorePending} disabled={loading || pendingMore}>Load more</button>
 			</div>
 		{/if}
 	</Card>
@@ -234,7 +225,7 @@
 							<td class="col-actions">
 								<div class="row-actions">
 									<button
-										class="retry"
+										class="secondary"
 										onclick={() => onRetry(job.storage_key)}
 										disabled={busyKey === job.storage_key}
 									>
@@ -256,7 +247,7 @@
 		</table>
 		{#if failedNext}
 			<div class="load-more">
-				<button onclick={loadMoreFailed} disabled={loading || failedMore}>Load more</button>
+				<button class="secondary" onclick={loadMoreFailed} disabled={loading || failedMore}>Load more</button>
 			</div>
 		{/if}
 	</Card>
@@ -270,82 +261,26 @@
 		margin-bottom: 1rem;
 	}
 
-	.refresh {
-		padding: 0.4rem 0.9rem;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		background: var(--color-surface);
-		color: inherit;
-		cursor: pointer;
-	}
-
-	.refresh:hover:not(:disabled) {
-		background: var(--color-surface-hover, var(--color-surface));
-	}
-
-	.mono {
-		font-family: var(--font-mono, monospace);
-		font-size: 0.85rem;
-	}
-
 	.error-cell {
 		max-width: 28rem;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		color: var(--color-text-muted, inherit);
-		font-size: 0.85rem;
+		color: var(--muted);
+		font-size: 0.8125rem;
 	}
 
 	.row-actions {
 		display: flex;
-		gap: 0.5rem;
+		gap: 0.375rem;
 		align-items: center;
 		justify-content: flex-end;
-	}
-
-	.col-actions {
-		text-align: right;
-		width: 1%;
-		white-space: nowrap;
-	}
-
-	.retry {
-		padding: 0.25rem 0.6rem;
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		background: var(--color-surface);
-		color: inherit;
-		cursor: pointer;
-	}
-
-	.retry:hover:not(:disabled) {
-		background: var(--color-surface-hover, var(--color-surface));
-	}
-
-	.retry:disabled {
-		opacity: 0.5;
-		cursor: default;
 	}
 
 	.load-more {
 		display: flex;
 		justify-content: center;
-		margin-top: 0.75rem;
-	}
-
-	.load-more button {
-		padding: 0.35rem 1rem;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		background: var(--color-surface);
-		color: inherit;
-		cursor: pointer;
-	}
-
-	.badge.backoff {
-		margin-left: 0.4rem;
-		background: var(--color-warning-bg, #fef3c7);
-		color: var(--color-warning, #b45309);
+		padding: 0.625rem;
+		border-top: 1px solid var(--border);
 	}
 </style>

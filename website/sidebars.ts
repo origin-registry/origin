@@ -31,6 +31,7 @@ const sidebars: SidebarsConfig = {
         'how-to/configure-webhook-authorization',
         'how-to/run-storage-maintenance',
         'how-to/enable-web-ui',
+        'how-to/scan-images',
         'how-to/troubleshoot-common-issues',
       ],
     },

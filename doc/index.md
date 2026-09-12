@@ -32,6 +32,7 @@ Step-by-step instructions for specific tasks:
 
 ### Events
 - [Configure Event Webhooks](how-to/configure-event-webhooks.md)
+- [Scan Images with an External Scanner](how-to/scan-images.md)
 
 ### Replication
 - [Configure Replication](how-to/configure-replication.md)

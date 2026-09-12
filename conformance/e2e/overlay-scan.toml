@@ -1,0 +1,28 @@
+# E2E overlay for the scan queue: pushes into the "scan" repository enqueue a
+# scan job, the worker asks `angos scanner grype` on the host for the report
+# and attaches it as a referrer; retention keeps the report with its image and
+# reclaims both together. Passed as a second `-c` file after the backend one.
+# No grace, so a prune right after a delete reclaims immediately.
+[global]
+gc_grace_secs = 0
+
+[global.scan]
+url = "http://127.0.0.1:8766"
+token = "e2e-scan-secret"
+
+[global.access_policy]
+default = "allow"
+
+[global.retention_policy]
+rules = ["image.tag != null"]
+
+[repository."scan"]
+scan = true
+
+[scanner]
+bind_address = "127.0.0.1"
+port = 8766
+token = "e2e-scan-secret"
+
+[scanner.registry]
+url = "http://127.0.0.1:8000"
