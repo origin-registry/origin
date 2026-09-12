@@ -2,11 +2,11 @@ use std::fmt;
 
 use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
 
-use crate::scan::ScanImagePayload;
 use crate::{
     jobs::{JobState, Queue},
     registry::{blob_store::OrphanMultipartUpload, metadata_store::LinkKind},
 };
+use crate::{layer::IndexLayerPayload, scan::ScanImagePayload};
 
 /// Root prefix quarantined keys are moved under, preserving their original
 /// path below it. The walk knows the prefix, so quarantined objects are never
@@ -110,6 +110,9 @@ pub enum Action {
     /// Enqueue a scan of an image manifest; a forced one scans it again even
     /// when a report already hangs off it.
     EnqueueScan(ScanImagePayload),
+    /// Enqueue the filesystem indexing of a layer; a forced one walks it
+    /// again even when a listing exists.
+    EnqueueIndex(IndexLayerPayload),
     /// Enqueue a replication delete for a downstream-only tag, only on a
     /// `prune = true` downstream: absence-driven deletion would destroy an
     /// active-active peer's not-yet-replicated newer tag.
@@ -271,6 +274,14 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "enqueue replication delete of '{namespace}:{tag}' on downstream '{downstream}'"
+                )
+            }
+            Action::EnqueueIndex(index) => {
+                let forced = if index.force { " (forced)" } else { "" };
+                write!(
+                    f,
+                    "enqueue index of layer '{}@{}'{forced}",
+                    index.namespace, index.digest
                 )
             }
             Action::EnqueueScan(scan) => {

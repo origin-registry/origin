@@ -191,6 +191,7 @@ path's retry, backoff and coalescing.
 ```bash
 angos reconcile replication [options]
 angos reconcile scan [options]
+angos reconcile index [options]
 ```
 
 #### reconcile replication
@@ -212,6 +213,15 @@ Enqueue a scan job for every image manifest of a `scan = true` repository that c
 | `--dry-run` | `-d`  | Preview what would be enqueued without changes           |
 | `--force`   |       | Scan every image again, attaching a fresh report to each |
 
+#### reconcile index
+
+Enqueue a filesystem index job for every tar layer of the images of an `index = true` repository that has no listing yet, so the web UI opens them without an "Indexing" wait. A layer shared by several images is enqueued once. Any image indexes itself the first time its filesystem is opened, so this is for having the listings ready ahead of that, or, with `--force`, for walking every layer again. The running server or a worker drains the jobs; the command returns once they are enqueued. See [Explore Image Filesystems](../how-to/explore-image-filesystems.md).
+
+| Option      | Short | Description                                      |
+|-------------|-------|--------------------------------------------------|
+| `--dry-run` | `-d`  | Preview what would be enqueued without changes   |
+| `--force`   |       | Walk every layer again, rewriting its listing    |
+
 **Examples:**
 
 ```bash
@@ -226,6 +236,9 @@ angos reconcile scan
 
 # Re-scan everything after a scanner database update
 angos reconcile scan --force
+
+# Index the layers of every image nobody has opened yet
+angos reconcile index
 ```
 
 ---
@@ -233,10 +246,10 @@ angos reconcile scan --force
 ### worker
 
 Process durable background jobs from the job queue. With no `--queue` argument
-the worker drains the pull-through cache queue, the replication queue and,
-when `[global.scan]` is configured, the scan queue, each on its own worker
-pool. Pass `--queue` (repeatable) to drain specific queues instead, e.g.
-`angos worker --queue replication`.
+the worker drains the pull-through cache queue, the replication queue, the
+layer index queue and, when `[global.scan]` is configured, the scan queue,
+each on its own worker pool. Pass `--queue` (repeatable) to drain specific
+queues instead, e.g. `angos worker --queue replication`.
 
 ```bash
 angos worker [options]

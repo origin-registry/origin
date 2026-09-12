@@ -629,6 +629,74 @@ input[type='checkbox']:focus-visible {
 	outline-offset: 1px;
 }
 
+input[type='text'],
+input[type='search'],
+select {
+	font: inherit;
+	font-size: 0.875rem;
+	color: inherit;
+	padding: 0.3rem 0.5rem;
+	border: 0;
+	border-radius: var(--radius);
+	background: var(--field);
+	box-shadow: var(--shadow-well);
+}
+
+input[type='text']:focus-visible,
+input[type='search']:focus-visible,
+select:focus-visible {
+	outline: none;
+	background: var(--surface);
+	box-shadow: var(--focus);
+}
+
+/* ===== FILESYSTEM ===== */
+.fs-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 0.875rem;
+	border-bottom: 1px solid var(--border);
+	background: var(--subtle);
+}
+
+.fs-toolbar input {
+	flex: 1;
+	min-width: 8rem;
+}
+
+.fs-name {
+	white-space: nowrap;
+}
+
+.fs-toggle {
+	display: inline-block;
+	width: 1rem;
+	color: var(--muted);
+	font-size: 0.75rem;
+}
+
+.fs-link {
+	margin-left: 0.4rem;
+	color: var(--muted);
+}
+
+.fs-deleted {
+	text-decoration: line-through;
+	color: var(--muted);
+}
+
+.fs-content pre {
+	max-height: 32rem;
+	border-radius: 0;
+}
+
+/* A note in place of the file's text keeps the panel's padding. */
+.fs-content p {
+	margin: 0;
+	padding: 0.75rem 0.875rem;
+}
+
 /* ===== STATES ===== */
 .loading {
 	display: flex;
@@ -637,6 +705,15 @@ input[type='checkbox']:focus-visible {
 	padding: 1.5rem 0;
 	color: var(--muted);
 	font-size: 0.875rem;
+}
+
+/* Inside a panel, a state keeps the panel's padding off the border. */
+.card .loading {
+	padding: 1.5rem 0.875rem;
+}
+
+.card .error {
+	margin: 0.75rem 0.875rem;
 }
 
 .loading::before {

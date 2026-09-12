@@ -68,6 +68,7 @@ fn classify(
                 )
             }))
         }
+        Queue::Index => Ok(None),
         Queue::Cache => {
             let payload: CacheFetchBlobPayload = serde_json::from_value(payload)?;
             let configured = resolver
@@ -228,7 +229,7 @@ pub async fn sweep_orphan_jobs(
     sink: &dyn ActionSink,
     concurrency: usize,
 ) -> Result<(), Error> {
-    for queue in [Queue::Replication, Queue::Cache, Queue::Scan] {
+    for queue in [Queue::Replication, Queue::Cache, Queue::Scan, Queue::Index] {
         OrphanJobChecker::new(job_store.clone(), resolver.clone(), queue, concurrency)
             .check_all(sink)
             .await?;
@@ -320,6 +321,7 @@ mod tests {
             immutable_tags: false,
             immutable_tags_exclusions: Vec::new(),
             scan: false,
+            index: false,
         }
     }
 

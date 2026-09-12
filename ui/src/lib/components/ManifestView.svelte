@@ -12,7 +12,8 @@
 		latestScanReport,
 		scanUrl,
 		isOrasArtifact,
-		getFileName
+		getFileName,
+		isFilesystemLayer
 	} from '$lib/utils';
 	import Card from './Card.svelte';
 	import DeleteButton from './DeleteButton.svelte';
@@ -25,6 +26,7 @@
 	import PullHistory from './PullHistory.svelte';
 	import ScanSummary from './ScanSummary.svelte';
 	import ScanSummaryCard from './ScanSummaryCard.svelte';
+	import LayerBrowser from './LayerBrowser.svelte';
 
 	interface Props {
 		path: string;
@@ -78,6 +80,13 @@
 					? [{ label: formatPlatform(m.platform), annotations: report.annotations, href: scanUrl(path, report.digest) }]
 					: [];
 			})
+	);
+
+	// A plain image's tar layers, the ones the filesystem view is built from.
+	const fsLayers = $derived(
+		!manifest.subject && !manifest.artifactType
+			? (manifest.layers ?? []).filter((layer) => isFilesystemLayer(layer.mediaType))
+			: []
 	);
 
 	type LayersViewMode = 'auto' | 'files' | 'layers';
@@ -305,6 +314,10 @@
 	{/if}
 {/if}
 
+
+{#if fsLayers.length > 0}
+	<LayerBrowser namespace={path} layers={fsLayers} />
+{/if}
 
 {#if manifest.manifests && manifest.manifests.length > 0}
 	{@const platformManifests = manifest.manifests.filter(m => !m.annotations?.['vnd.docker.reference.digest'])}
