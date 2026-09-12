@@ -79,6 +79,15 @@ RUST_LOG=info angos -c scanner.toml scanner grype
 
 At `info` it logs one line per image scanned. See the [configuration reference](../reference/configuration.md#scanner-service-scanner) for the other options.
 
+The registry image also comes with a scanner built in, under the `-grype` and `-trivy` tag suffixes, so the same service runs as a container:
+
+```bash
+docker run -d -p 8766:8766 -v "$PWD/scanner.toml:/scanner.toml" \
+  ghcr.io/project-angos/angos:latest-grype -c /scanner.toml scanner grype
+```
+
+The scanner keeps its database under `/cache`; mount a volume there to keep it across restarts.
+
 ## Step 4: Drain the Scan Queue
 
 With `[global.job_queue]` configured, scan jobs are durable and a worker drains them:
