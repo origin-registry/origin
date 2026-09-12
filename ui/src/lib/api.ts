@@ -145,6 +145,7 @@ interface FailedJobsResponse {
 export type JobState = 'pending' | 'failed';
 
 export type JobQueue = 'cache' | 'replication' | 'scan';
+export const JOB_QUEUES: JobQueue[] = ['cache', 'replication', 'scan'];
 
 const MANIFEST_ACCEPT_HEADER = [
 	'application/vnd.oci.image.manifest.v1+json',

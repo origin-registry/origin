@@ -21,7 +21,7 @@ name = "My Registry"
 | Option    | Type   | Default             | Description                           |
 |-----------|--------|---------------------|---------------------------------------|
 | `enabled` | bool   | `false`             | Enable the web interface              |
-| `name`    | string | `"Angos"` | Registry name displayed in the header |
+| `name`    | string | `"Angos"` | Registry name displayed in the top bar |
 
 ---
 
@@ -36,6 +36,7 @@ URLs follow Docker reference format:
 | `/{repository}/{namespace}`          | Manifest list    | All manifests for an image  |
 | `/{repository}/{namespace}:{tag}`    | Manifest details | Manifest by tag             |
 | `/{repository}/{namespace}@{digest}` | Manifest details | Manifest by digest          |
+| `/jobs/{queue}`                      | Jobs             | Pending and failed jobs of the `cache`, `replication` or `scan` queue; `/jobs` opens the cache queue |
 
 **Examples:**
 - `/` - List all repositories
@@ -179,12 +180,12 @@ Tree view of all manifests:
 </picture>
 
 Complete manifest information:
-- **Header**: Digest, media type, size
+- **Title**: the full name the page was opened by, `namespace:tag` or `namespace@digest`, with a copy button
 - **Tags**: List with delete buttons
 - **Layers/Children**: For images or indexes
 - **Annotations**: Expandable metadata
 - **Files**: For ORAS artifacts with download links
-- **Vulnerabilities**: an image with a scan report, and the report manifest itself, show a table beside the manifest with the findings by severity, the scanner and the scan time; its rows open the report page, which links back to the scanned manifest with its tags and to the report manifest, and lists every finding, filterable by severity, with the package, installed and fixed versions and a link to the advisory. The counts also appear next to the `vuln` badge in the tree and in referrer lists.
+- **Vulnerabilities**: an image with a scan report, and the report manifest itself, show a table beside the manifest with the findings by severity, the scanner and the scan time; a multi-platform index shows the same table with one tab per platform manifest that has a report. The rows open the report page, which links back to the scanned manifest with its tags and to the report manifest, and lists every finding, filterable by severity, with the package, installed and fixed versions and a link to the advisory. The counts also appear next to the `vuln` badge in the tree and in referrer lists.
 - **Referrers**: Linked signatures, SBOMs, etc. The first 100 per manifest load with the view; a "Load more referrers" control fetches the next page from the referrers endpoint, so browsing past the first page needs the `get-referrers` action.
 - **Parent**: Link to parent index if applicable
 - **Pull history**: Collapsed by default and fetched on expand, listing the newest 100 recorded pulls of the reference the view was addressed by (a tag and a digest are recorded separately). The heading states the configured retention, since superseded entries are collected past it; recording happens only when `update_pull_time` is enabled.
@@ -221,11 +222,11 @@ Delete buttons require double-click confirmation:
 
 ### Copy to Clipboard
 
-Click on digests to copy the full value.
+The manifest page's title carries a copy button; it copies the full name, `namespace:tag` or `namespace@sha256:…`, so what is copied can be pulled as is.
 
 ### Theme Toggle
 
-Toggle between light and dark themes using the header button. Preference is saved in browser local storage.
+Toggle between light, dark and system themes with the switcher at the right of the top bar. Preference is saved in browser local storage.
 
 ![Dark and Light Theme](../images/ui-dark-light.png)
 

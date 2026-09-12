@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The web UI was redesigned around a calmer, document-like look: a single top bar carries the registry name, the breadcrumb trail, the page links and the theme switcher, pages open with a title, panels and tables use hairline rules and soft tag colours, and the bundled fonts gave way to the system UI font.
+- A manifest page is titled by the full name it was opened by, `namespace:tag` or `namespace@digest`, with a copy button.
+- A multi-platform index shows the vulnerabilities of its platform manifests in the same panel as an image, with one tab per platform.
+- The Jobs page has one URL per queue, `/jobs/cache`, `/jobs/replication` and `/jobs/scan`, so a queue can be linked to; `/jobs` opens the cache queue.
 - **Breaking:** `angos replicate` is now `angos reconcile replication`; options and behaviour are unchanged.
 - **Breaking:** a referrer such as a signature, an SBOM or a scan report no longer pins its subject against retention and is no longer judged as untagged content of its own: `angos prune` skips it while its subject resolves and reclaims it with the subject in the same run.
 - The container image runs as UID 65534 instead of root, so a bind-mounted data directory must be owned by that user and a mounted private key readable by it; see the upgrade guide.

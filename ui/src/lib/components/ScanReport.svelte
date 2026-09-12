@@ -118,18 +118,18 @@
 		justify-content: space-between;
 		align-items: center;
 		gap: 0.5rem;
-		margin-bottom: 0.75rem;
+		padding: 0.625rem 0.875rem;
+		border-bottom: 1px solid var(--border);
 	}
 	.scanner {
-		color: var(--color-text-muted);
+		color: var(--muted);
 		font-size: 0.8125rem;
 	}
 	.description {
 		max-width: 32rem;
 	}
 	button.severity {
-		border: none;
-		cursor: pointer;
+		box-shadow: none;
 	}
 	button.severity.muted {
 		opacity: 0.35;

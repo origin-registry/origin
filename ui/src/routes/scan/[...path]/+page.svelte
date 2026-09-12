@@ -48,6 +48,9 @@
 	]}
 />
 
+<h1>Vulnerability report</h1>
+<p class="lede">{data.path}</p>
+
 {#if error}
 	<ErrorState message={error} />
 {:else if manifest}

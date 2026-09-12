@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import type { ParentRef, Manifest, ReferrerInfo } from '$lib/api';
 	import {
+		formatPlatform,
 		formatSize,
 		getTagConfirm,
 		isInteractiveTarget,
@@ -66,6 +67,18 @@
 
 	let expandedAnnotations: Set<string> = $state(new Set());
 	const latestReport = $derived(digest ? latestScanReport(childReferrers.get(digest) ?? []) : null);
+	// An index is not scanned itself; its platform manifests are, and their
+	// reports are what the index page shows.
+	const childReports = $derived(
+		(manifest.manifests ?? [])
+			.filter((m) => !m.annotations?.['vnd.docker.reference.digest'])
+			.flatMap((m) => {
+				const report = latestScanReport(childReferrers.get(m.digest) ?? []);
+				return report
+					? [{ label: formatPlatform(m.platform), annotations: report.annotations, href: scanUrl(path, report.digest) }]
+					: [];
+			})
+	);
 
 	type LayersViewMode = 'auto' | 'files' | 'layers';
 	let layersViewMode: LayersViewMode = $state('auto');
@@ -163,9 +176,11 @@
 	</table>
 </Card>
 {#if manifest.artifactType === 'application/sarif+json' && digest}
-	<ScanSummaryCard annotations={manifest.annotations} href={scanUrl(path, digest)} />
+	<ScanSummaryCard reports={[{ annotations: manifest.annotations, href: scanUrl(path, digest) }]} />
 {:else if latestReport}
-	<ScanSummaryCard annotations={latestReport.annotations} href={scanUrl(path, latestReport.digest)} />
+	<ScanSummaryCard reports={[{ annotations: latestReport.annotations, href: scanUrl(path, latestReport.digest) }]} />
+{:else}
+	<ScanSummaryCard reports={childReports} />
 {/if}
 </div>
 
@@ -196,7 +211,7 @@
 				</tr>
 				<tr>
 					<td class="label">Size</td>
-					<td>{formatSize(manifest.config.size)}</td>
+					<td class="nowrap">{formatSize(manifest.config.size)}</td>
 				</tr>
 				{#if manifest.config.annotations && expandedAnnotations.has('config')}
 					<AnnotationList annotations={manifest.config.annotations} />
@@ -230,7 +245,7 @@
 						<tr>
 							<td class="filename">{getFileName(layer) ?? layer.digest}</td>
 							<td>{layer.mediaType}</td>
-							<td>{formatSize(layer.size)}</td>
+							<td class="nowrap">{formatSize(layer.size)}</td>
 							<td>
 								<a class="download-link" href={getbloburl(layer.digest)} download={getFileName(layer) ?? layer.digest}>Download</a>
 							</td>
@@ -240,7 +255,7 @@
 				<tfoot>
 					<tr>
 						<td colspan="2" class="total-label">Total</td>
-						<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
+						<td class="nowrap">{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 						<td></td>
 					</tr>
 				</tfoot>
@@ -268,7 +283,7 @@
 								/>
 							</td>
 							<td>{layer.mediaType}</td>
-							<td>{formatSize(layer.size)}</td>
+							<td class="nowrap">{formatSize(layer.size)}</td>
 						</tr>
 						{#if layer.annotations && expandedAnnotations.has(`layer:${layer.digest}`)}
 							<tr class="annotations-row">
@@ -282,7 +297,7 @@
 				<tfoot>
 					<tr>
 						<td colspan="2" class="total-label">Total</td>
-						<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
+						<td class="nowrap">{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 					</tr>
 				</tfoot>
 			</table>
@@ -322,7 +337,7 @@
 							<PlatformBadge platform={m.platform} />
 						</td>
 						<td>{m.mediaType}</td>
-						<td>{formatSize(m.size)}</td>
+						<td class="nowrap">{formatSize(m.size)}</td>
 					</tr>
 					{#if m.annotations && expandedAnnotations.has(`manifest:${m.digest}`)}
 						<tr class="annotations-row">

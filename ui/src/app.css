@@ -1,240 +1,272 @@
-@import '@fontsource/inter/400.css';
-@import '@fontsource/inter/500.css';
-@import '@fontsource/inter/600.css';
-@import '@fontsource/inter/700.css';
-@import '@fontsource/jetbrains-mono/400.css';
-@import '@fontsource/jetbrains-mono/500.css';
-
+/* A warm, low-contrast palette where every rule, tint and hover
+   is the text colour at a low alpha, hairline borders, corners that stay
+   nearly square, and the system UI font. The dark theme swaps the ink. */
 :root {
-	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-	--font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
-
-	--color-primary: #0891b2;
-	--color-primary-dark: #0782a1;
-	--color-primary-light: #22d3ee;
-	--color-secondary: #6366f1;
-
-	--color-bg: #ffffff;
-	--color-surface: #f8fafc;
-	--color-text: #1e293b;
-	--color-text-muted: #64748b;
-	--color-border: #e2e8f0;
-
-	--color-success: #10b981;
-	--color-warning: #f59e0b;
-	--color-error: #ef4444;
-
-	--shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-	--shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-	--shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-
-	--radius-sm: 6px;
-	--radius-md: 8px;
-	--radius-lg: 12px;
-	--radius-full: 9999px;
+	--ink: 55, 53, 47;
+	--bg: #fff;
+	--surface: #fff;
+	--sidebar: #f7f7f5;
+	--text: rgb(var(--ink));
+	--muted: rgba(var(--ink), 0.65);
+	--faint: rgba(var(--ink), 0.45);
+	--border: rgba(var(--ink), 0.09);
+	--border-strong: rgba(var(--ink), 0.16);
+	--subtle: rgba(var(--ink), 0.04);
+	--hover: rgba(var(--ink), 0.06);
+	--hover-strong: rgba(var(--ink), 0.08);
+	--field: rgba(242, 241, 238, 0.6);
+	/* The accent is the logo's cyan; a soft wash of it marks what is current. */
+	--accent: #0891b2;
+	--accent-hover: #0e7490;
+	--accent-fg: #fff;
+	--accent-soft: rgba(8, 145, 178, 0.12);
+	--link: #0e7490;
+	--danger: #dc2626;
+	--danger-hover: #b91c1c;
+	--danger-fg: #b91c1c;
+	--danger-bg: #fee2e2;
+	--danger-border: #fecaca;
+	--warn-fg: #b45309;
+	--warn-bg: #fef3c7;
+	--warn-border: #fde68a;
+	--ok-fg: #047857;
+	--ok-bg: #d1fae5;
+	--ok-border: #a7f3d0;
+	/* Chip colours: a clear tint with dark text of the same hue. */
+	--chip-gray-bg: #e2e8f0;
+	--chip-gray-fg: #334155;
+	--chip-cyan-bg: #cffafe;
+	--chip-cyan-fg: #155e75;
+	--chip-blue-bg: #dbeafe;
+	--chip-blue-fg: #1e40af;
+	--chip-green-bg: #d1fae5;
+	--chip-green-fg: #065f46;
+	--chip-yellow-bg: #fef3c7;
+	--chip-yellow-fg: #92400e;
+	--chip-orange-bg: #ffedd5;
+	--chip-orange-fg: #9a3412;
+	--chip-red-bg: #fee2e2;
+	--chip-red-fg: #991b1b;
+	--chip-purple-bg: #ede9fe;
+	--chip-purple-fg: #5b21b6;
+	--radius-sm: 3px;
+	--radius: 4px;
+	--radius-lg: 6px;
+	--shadow-xs: rgba(15, 15, 15, 0.1) 0 1px 2px;
+	--shadow-ring: rgba(15, 15, 15, 0.1) 0 0 0 1px;
+	--shadow-well: rgba(15, 15, 15, 0.1) 0 1px 2px inset;
+	--shadow-lg:
+		rgba(15, 15, 15, 0.05) 0 0 0 1px,
+		rgba(15, 15, 15, 0.1) 0 3px 6px,
+		rgba(15, 15, 15, 0.2) 0 9px 24px;
+	--focus:
+		rgba(8, 145, 178, 0.57) 0 0 0 1px inset,
+		rgba(8, 145, 178, 0.35) 0 0 0 2px;
+	--ring: #0891b2;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+	color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-	:root:not([data-theme="light"]) {
-		--color-bg: #111827;
-		--color-surface: #1e293b;
-		--color-text: #f3f4f6;
-		--color-text-muted: #9ca3af;
-		--color-border: #374151;
-
-		--shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
-		--shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.4);
-		--shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.4);
-	}
+[data-theme='dark'] {
+	--ink: 255, 255, 255;
+	--bg: #191919;
+	--surface: #202020;
+	--sidebar: #202020;
+	--text: rgba(var(--ink), 0.81);
+	--muted: rgba(var(--ink), 0.46);
+	--faint: rgba(var(--ink), 0.3);
+	--border: rgba(var(--ink), 0.094);
+	--border-strong: rgba(var(--ink), 0.16);
+	--subtle: rgba(var(--ink), 0.04);
+	--hover: rgba(var(--ink), 0.055);
+	--hover-strong: rgba(var(--ink), 0.08);
+	--field: rgba(var(--ink), 0.055);
+	--accent: #06b6d4;
+	--accent-hover: #22d3ee;
+	--accent-fg: #082f3a;
+	--accent-soft: rgba(6, 182, 212, 0.18);
+	--link: #67e8f9;
+	--danger-fg: #fca5a5;
+	--danger-bg: rgba(239, 68, 68, 0.16);
+	--danger-border: rgba(239, 68, 68, 0.35);
+	--warn-fg: #fcd34d;
+	--warn-bg: rgba(245, 158, 11, 0.16);
+	--warn-border: rgba(245, 158, 11, 0.35);
+	--ok-fg: #6ee7b7;
+	--ok-bg: rgba(16, 185, 129, 0.18);
+	--ok-border: rgba(16, 185, 129, 0.35);
+	--chip-gray-bg: rgba(148, 163, 184, 0.22);
+	--chip-gray-fg: #cbd5e1;
+	--chip-cyan-bg: rgba(6, 182, 212, 0.25);
+	--chip-cyan-fg: #67e8f9;
+	--chip-blue-bg: rgba(59, 130, 246, 0.25);
+	--chip-blue-fg: #93c5fd;
+	--chip-green-bg: rgba(16, 185, 129, 0.25);
+	--chip-green-fg: #6ee7b7;
+	--chip-yellow-bg: rgba(245, 158, 11, 0.25);
+	--chip-yellow-fg: #fcd34d;
+	--chip-orange-bg: rgba(249, 115, 22, 0.25);
+	--chip-orange-fg: #fdba74;
+	--chip-red-bg: rgba(239, 68, 68, 0.25);
+	--chip-red-fg: #fca5a5;
+	--chip-purple-bg: rgba(139, 92, 246, 0.25);
+	--chip-purple-fg: #c4b5fd;
+	--ring: #22d3ee;
+	--shadow-xs: rgba(0, 0, 0, 0.3) 0 1px 2px;
+	--shadow-ring: rgba(var(--ink), 0.12) 0 0 0 1px;
+	--shadow-well: rgba(0, 0, 0, 0.3) 0 1px 2px inset;
+	--shadow-lg:
+		rgba(var(--ink), 0.1) 0 0 0 1px,
+		rgba(0, 0, 0, 0.3) 0 3px 6px,
+		rgba(0, 0, 0, 0.5) 0 9px 24px;
+	color-scheme: dark;
 }
 
-[data-theme="dark"] {
-	--color-bg: #111827;
-	--color-surface: #1e293b;
-	--color-text: #f3f4f6;
-	--color-text-muted: #9ca3af;
-	--color-border: #374151;
-
-	--shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
-	--shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.4);
-	--shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.4);
-}
-
-* {
+*,
+*::before,
+*::after {
 	box-sizing: border-box;
 }
 
 body {
 	margin: 0;
-	font-family: var(--font-sans);
-	font-size: 14px;
-	background-color: var(--color-bg);
-	color: var(--color-text);
-	line-height: 1.6;
-}
-
-.container {
-	max-width: 1400px;
-	margin: 0 auto;
-	padding: 1rem 1.5rem;
-}
-
-/* ===== HEADER ===== */
-header {
-	background: var(--color-bg);
-	border-bottom: 1px solid var(--color-border);
-	position: sticky;
-	top: 0;
-	z-index: 100;
-}
-
-header .container {
-	padding-top: 0.75rem;
-	padding-bottom: 0.75rem;
-}
-
-.header-content {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-}
-
-.header-left {
-	display: flex;
-	align-items: center;
-	gap: 1.5rem;
-}
-
-.header-brand {
-	display: flex;
-	align-items: center;
-	gap: 0.75rem;
-	text-decoration: none;
-}
-
-.header-logo {
-	width: 32px;
-	height: 32px;
-}
-
-header h1 {
-	margin: 0;
-	font-size: 1.25rem;
-	font-weight: 700;
-	color: var(--color-text);
-	letter-spacing: -0.01em;
-}
-
-nav {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-}
-
-nav a {
-	color: var(--color-text-muted);
-	text-decoration: none;
-	font-size: 0.875rem;
-	font-weight: 500;
-	padding: 0.5rem 0.75rem;
-	border-radius: var(--radius-md);
-	transition: all 0.15s ease;
-}
-
-nav a:hover {
-	color: var(--color-primary);
-	text-decoration: none;
-	background: rgba(8, 145, 178, 0.1);
-	background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+	font:
+		15px/1.5 ui-sans-serif,
+		-apple-system,
+		BlinkMacSystemFont,
+		'Segoe UI',
+		Helvetica,
+		'Apple Color Emoji',
+		Arial,
+		sans-serif;
+	color: var(--text);
+	background: var(--bg);
+	-webkit-font-smoothing: antialiased;
 }
 
 /* ===== TYPOGRAPHY ===== */
+h1 {
+	font-size: 1.5rem;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	margin: 0 0 0.5rem;
+	overflow-wrap: anywhere;
+}
+
 h2 {
-	font-size: 1.125rem;
+	font-size: 0.9375rem;
 	font-weight: 600;
-	color: var(--color-text);
-	margin: 1.5rem 0 1rem 0;
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-}
-
-h2 a {
-	color: var(--color-text-muted);
-	text-decoration: none;
-	transition: color 0.15s ease;
-}
-
-h2 a:hover {
-	color: var(--color-primary);
+	letter-spacing: -0.01em;
+	margin: 1.5rem 0 0.625rem;
 }
 
 h3 {
-	font-size: 0.75rem;
+	font-size: 0.9375rem;
 	font-weight: 600;
-	color: var(--color-text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	margin: 0 0 0.75rem 0;
+	letter-spacing: -0.01em;
+	margin: 0;
 }
 
-/* ===== CARDS ===== */
+.lede {
+	margin: 0 0 1.25rem;
+	color: var(--muted);
+}
+
+.muted {
+	color: var(--muted);
+	font-size: 0.875rem;
+}
+
+a {
+	color: var(--link);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+	text-decoration-thickness: 1px;
+	text-underline-offset: 2px;
+}
+
+/* Digests and identifiers are everywhere, so the mono chip stays neutral
+   rather than an accent colour. */
+code {
+	font-family: var(--font-mono);
+	font-size: 0.85em;
+	padding: 0.1rem 0.35rem;
+	border-radius: var(--radius-sm);
+	background: var(--subtle);
+	color: inherit;
+	white-space: nowrap;
+}
+
+/* A digest beside its label may wrap; in a listing it stays on one line and
+   the panel scrolls instead. */
+.label + td code {
+	white-space: normal;
+	word-break: break-all;
+}
+
+pre {
+	margin: 0;
+	padding: 0.875rem;
+	border-radius: var(--radius);
+	background: var(--sidebar);
+	font: 0.875rem/1.6 var(--font-mono);
+	overflow-x: auto;
+}
+
+/* ===== PANELS ===== */
+/* App pages are stacks of these: one section, one panel. A table inside
+   sits flush with the panel's edges. */
 .card {
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
+	background: var(--surface);
+	border: 1px solid var(--border);
 	border-radius: var(--radius-lg);
-	margin-bottom: 1rem;
-	overflow: hidden;
-	box-shadow: var(--shadow-sm);
-}
-
-.card.warning {
-	border-left: 3px solid var(--color-warning);
-}
-
-.card.warning h3 {
-	color: var(--color-warning);
+	margin: 0 0 1rem;
+	overflow-x: auto;
 }
 
 .card-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 0.75rem 1rem;
-	background: var(--color-bg);
-	border-bottom: 1px solid var(--color-border);
+	gap: 1rem;
+	padding: 0.625rem 0.875rem;
+	border-bottom: 1px solid var(--border);
 }
 
-.card-header h3 {
-	margin: 0;
+.card-header .count {
+	color: var(--muted);
+	font-weight: 400;
+	margin-left: 0.35rem;
+}
+
+.card.warning .card-header h3 {
+	color: var(--warn-fg);
 }
 
 .card > table {
-	border: none;
+	border: 0;
 	border-radius: 0;
-	box-shadow: none;
 }
 
-.card > table:last-child tr:last-child td {
-	border-bottom: none;
+.card > table tr:last-child td {
+	border-bottom: 0;
 }
 
 .header-actions {
 	display: flex;
+	align-items: center;
 	gap: 0.5rem;
 }
 
-/* Delete controls in a card header stay as compact as their table
-   counterparts so their appearance does not change the header height. */
-.header-actions button.danger,
-.header-actions .delete-confirm button {
-	padding: 0.2rem 0.5rem;
-	font-size: 0.6875rem;
-	line-height: 1;
-}
-
-.header-actions > button.danger {
-	border-radius: 3px;
+/* A second header row holding a panel's tabs, under the title row. */
+.card-tabs {
+	display: flex;
+	padding: 0.5rem 0.875rem;
+	border-bottom: 1px solid var(--border);
+	background: var(--subtle);
 }
 
 /* ===== TABLES ===== */
@@ -242,242 +274,415 @@ table {
 	width: 100%;
 	border-collapse: separate;
 	border-spacing: 0;
-	font-size: 0.8125rem;
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-sm);
+	font-size: 0.875rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--surface);
 }
 
-th, td {
+th,
+td {
 	text-align: left;
+	vertical-align: middle;
 	padding: 0.4rem 0.75rem;
-	border-bottom: 1px solid var(--color-border);
+	border-bottom: 1px solid var(--border);
 }
 
 th {
-	background: var(--color-surface);
-	font-weight: 600;
-	font-size: 0.6875rem;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: var(--color-text-muted);
-	padding: 0.35rem 0.75rem;
-}
-
-tbody tr {
-	background: var(--color-bg);
-	transition: background 0.15s ease;
-}
-
-tbody tr:nth-child(even) {
-	background: var(--color-surface);
-}
-
-tr:hover td {
-	background: rgba(8, 145, 178, 0.05);
-	background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+	font-weight: 500;
+	font-size: 0.8125rem;
+	color: var(--muted);
+	white-space: nowrap;
 }
 
 tr:last-child td {
-	border-bottom: none;
+	border-bottom: 0;
 }
 
-table button {
-	padding: 0.2rem 0.5rem;
-	font-size: 0.6875rem;
-	line-height: 1;
-	border-radius: 3px;
+tbody tr:hover td {
+	background: var(--subtle);
+}
+
+tfoot td {
+	color: var(--muted);
+	border-top: 1px solid var(--border);
+	border-bottom: 0;
+}
+
+.clickable {
+	cursor: pointer;
+}
+
+.row-link {
+	color: inherit;
+	text-decoration: none;
+}
+
+.row-link:hover {
+	text-decoration: underline;
+}
+
+.label {
+	color: var(--muted);
+	width: 9rem;
+	white-space: nowrap;
+}
+
+.total-label {
+	text-align: right;
+}
+
+.empty {
+	text-align: center;
+	color: var(--muted);
+	padding: 2rem 1rem;
+}
+
+.untagged,
+.no-features {
+	color: var(--faint);
+}
+
+.child-row td {
+	background: var(--subtle);
+}
+
+.annotations-row td {
+	background: var(--subtle);
+	padding-left: 1.5rem;
+}
+
+.annotation {
+	display: inline-block;
+	margin-right: 1rem;
+	font-size: 0.8125rem;
+}
+
+.annotation-key {
+	color: var(--muted);
+}
+
+.subject-meta,
+.scan-meta {
+	color: var(--muted);
+	font-size: 0.8125rem;
+}
+
+.subject-meta {
+	margin-left: 0.5rem;
+}
+
+.filename,
+.uuid,
+.mono {
+	font-family: var(--font-mono);
+	font-size: 0.85em;
+}
+
+.col-narrow {
+	width: 5rem;
+}
+
+.col-medium {
+	width: 7.5rem;
+}
+
+.col-wide {
+	width: 12.5rem;
+}
+
+.col-actions {
+	width: 1%;
+	white-space: nowrap;
+	text-align: right;
+}
+
+.col-select {
+	width: 2.25rem;
+}
+
+/* A size or a date never breaks; the wide columns give way instead. */
+.nowrap {
+	white-space: nowrap;
 }
 
 /* ===== BUTTONS ===== */
-button {
-	font-family: var(--font-sans);
-	background: var(--color-primary);
-	color: #ffffff;
-	border: none;
-	padding: 0.5rem 1rem;
+button,
+.btn {
+	font: inherit;
 	font-size: 0.875rem;
 	font-weight: 500;
-	border-radius: var(--radius-md);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.4rem;
+	padding: 0.375rem 0.75rem;
+	border: 0;
+	border-radius: var(--radius);
+	background: var(--accent);
+	color: var(--accent-fg);
+	text-decoration: none;
+	white-space: nowrap;
 	cursor: pointer;
-	transition: all 0.15s ease;
+	box-shadow: var(--shadow-xs);
+	transition:
+		background 0.12s,
+		box-shadow 0.12s;
 }
 
-button:hover:not(.tree-toggle) {
-	background: var(--color-primary-dark);
+button:hover,
+.btn:hover {
+	background: var(--accent-hover);
+	text-decoration: none;
 }
 
-button.secondary {
-	background: var(--color-surface);
-	color: var(--color-text);
-	border: 1px solid var(--color-border);
+button:focus-visible,
+.btn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
 }
 
-button.secondary:hover {
-	border-color: var(--color-primary);
-	color: var(--color-primary);
-	background: var(--color-surface);
+/* The quiet button is the surface colour with its edge drawn as a shadow. */
+button.secondary,
+.btn.secondary {
+	background: var(--surface);
+	color: var(--text);
+	box-shadow:
+		var(--shadow-ring),
+		var(--shadow-xs);
+}
+
+button.secondary:hover,
+.btn.secondary:hover {
+	background: var(--hover);
 }
 
 button.danger {
-	background: var(--color-error);
-	color: #ffffff;
+	background: var(--danger);
+	color: #fff;
 }
 
 button.danger:hover {
-	background: #dc2626;
+	background: var(--danger-hover);
 }
 
 button:disabled {
 	opacity: 0.5;
-	cursor: not-allowed;
-	transform: none;
+	cursor: default;
 }
 
-/* ===== DELETE CONFIRMATION ===== */
+button:disabled:hover {
+	background: var(--accent);
+}
+
+button.secondary:disabled:hover {
+	background: var(--surface);
+}
+
+button.danger:disabled:hover {
+	background: var(--danger);
+}
+
+/* A button that reads as text, for toggles and downloads inside a cell. */
+button.link,
+.download-link {
+	display: inline;
+	padding: 0;
+	background: none;
+	box-shadow: none;
+	color: var(--link);
+	font-weight: 500;
+}
+
+button.link:hover,
+.download-link:hover {
+	background: none;
+	text-decoration: underline;
+}
+
+/* Row actions are compact, and a delete stays quiet until it is armed. */
+table button,
+.header-actions button {
+	padding: 0.2rem 0.5rem;
+	font-size: 0.75rem;
+}
+
+table button.danger,
+.header-actions button.danger {
+	background: var(--danger-bg);
+	box-shadow: none;
+	color: var(--danger-fg);
+}
+
+table button.danger:hover,
+.header-actions button.danger:hover {
+	background: var(--danger);
+	color: #fff;
+}
+
 .delete-confirm {
 	display: inline-flex;
-	align-items: stretch;
-	border-radius: 3px;
-	overflow: hidden;
-}
-
-.delete-confirm button {
-	border-radius: 0;
-	margin: 0;
-}
-
-.delete-confirm .confirm {
-	background: var(--color-error);
-	color: #ffffff;
-	border-left: 1px solid rgba(0, 0, 0, 0.15);
-}
-
-.delete-confirm .confirm:hover {
-	background: #dc2626;
+	gap: 0.25rem;
 }
 
 .delete-confirm .cancel {
-	background: var(--color-surface);
-	color: var(--color-text-muted);
+	background: var(--surface);
+	color: var(--text);
+	box-shadow: var(--shadow-ring);
 }
 
 .delete-confirm .cancel:hover {
-	background: var(--color-border);
-	color: var(--color-text);
+	background: var(--hover);
 }
 
-/* ===== VIEW TOGGLE ===== */
-.view-toggle {
+.delete-confirm .confirm {
+	background: var(--danger);
+	color: #fff;
+	box-shadow: var(--shadow-xs);
+}
+
+.delete-confirm .confirm:hover {
+	background: var(--danger-hover);
+}
+
+.actions {
 	display: flex;
-	gap: 0;
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-md);
+	flex-wrap: wrap;
+	gap: 0.375rem;
+}
+
+/* A segmented control: quiet buttons in one ring, the active one tinted. */
+.view-toggle {
+	display: inline-flex;
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-ring);
 	overflow: hidden;
 }
 
-.view-toggle button {
-	background: var(--color-bg);
-	color: var(--color-text-muted);
-	padding: 0.375rem 0.75rem;
-	font-size: 0.75rem;
+.view-toggle button,
+.view-toggle a {
+	padding: 0.25rem 0.625rem;
+	font-size: 0.8125rem;
+	font-weight: 500;
 	border-radius: 0;
-	border: none;
-	border-right: 1px solid var(--color-border);
+	background: var(--surface);
+	color: var(--muted);
+	box-shadow: none;
+	text-decoration: none;
 }
 
-.view-toggle button:last-child {
-	border-right: none;
+.view-toggle > * + * {
+	border-left: 1px solid var(--border);
 }
 
-.view-toggle button.active {
-	background: var(--color-primary);
-	color: #ffffff;
+.view-toggle button:hover,
+.view-toggle a:hover {
+	background: var(--hover);
+	color: var(--text);
+	text-decoration: none;
 }
 
-.view-toggle button:hover:not(.active) {
-	background: var(--color-surface);
-	color: var(--color-text);
-	transform: none;
+.view-toggle button.active,
+.view-toggle a[aria-current='page'] {
+	background: var(--accent-soft);
+	color: var(--accent-hover);
+}
+
+.view-toggle button:disabled:hover {
+	background: var(--surface);
+}
+
+/* ===== FIELDS ===== */
+input[type='checkbox'] {
+	appearance: none;
+	flex: none;
+	width: 1rem;
+	height: 1rem;
+	margin: 0;
+	padding: 0;
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	box-shadow: inset 0 0 0 1px var(--border-strong);
+	cursor: pointer;
+	vertical-align: -0.15em;
+}
+
+input[type='checkbox']:hover {
+	background: var(--hover);
+}
+
+input[type='checkbox']:checked {
+	background: var(--accent)
+		url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3.5 8.5 3 3 6-6'/%3E%3C/svg%3E")
+		center / 0.75rem no-repeat;
+	box-shadow: none;
+}
+
+input[type='checkbox']:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
 }
 
 /* ===== STATES ===== */
 .loading {
 	display: flex;
 	align-items: center;
-	justify-content: center;
-	gap: 0.75rem;
-	padding: 3rem;
-	color: var(--color-text-muted);
+	gap: 0.5rem;
+	padding: 1.5rem 0;
+	color: var(--muted);
 	font-size: 0.875rem;
 }
 
 .loading::before {
 	content: '';
-	width: 20px;
-	height: 20px;
-	border: 2px solid var(--color-border);
-	border-top-color: var(--color-primary);
+	width: 0.9em;
+	height: 0.9em;
+	border: 2px solid var(--border);
+	border-top-color: var(--muted);
 	border-radius: 50%;
-	animation: spin 0.8s linear infinite;
+	animation: spin 0.7s linear infinite;
 }
 
 @keyframes spin {
-	to { transform: rotate(360deg); }
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.error,
+.notice,
+.action-error {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0 0 1rem;
+	padding: 0.625rem 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--subtle);
+	font-size: 0.875rem;
+	line-height: 1.5;
 }
 
 .error {
-	display: flex;
-	align-items: center;
-	gap: 0.75rem;
-	color: var(--color-error);
-	padding: 1rem 1.25rem;
-	background: rgba(239, 68, 68, 0.1);
-	background: color-mix(in srgb, var(--color-error) 10%, transparent);
-	border: 1px solid var(--color-error);
-	border-radius: var(--radius-lg);
-	font-size: 0.875rem;
+	border-color: var(--danger-border);
+	background: var(--danger-bg);
+	color: var(--danger-fg);
 }
 
-.empty {
-	text-align: center;
-	color: var(--color-text-muted);
-	font-style: italic;
-	padding: 2rem 1rem;
+.error svg {
+	flex: none;
 }
 
-/* ===== CODE ===== */
-code {
-	font-family: var(--font-mono);
-	color: var(--color-primary);
-	font-size: 0.85em;
-	background: rgba(8, 145, 178, 0.1);
-	background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-	padding: 0.15rem 0.4rem;
-	border-radius: var(--radius-sm);
+.action-error {
+	border-color: var(--warn-border);
+	background: var(--warn-bg);
+	color: var(--warn-fg);
 }
 
-pre {
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-lg);
-	padding: 1rem;
-	overflow-x: auto;
-	font-size: 0.85rem;
-}
-
-/* ===== LINKS ===== */
-a {
-	color: var(--color-primary);
-	text-decoration: none;
-	transition: all 0.15s ease;
-}
-
-a:hover {
-	text-decoration: underline;
-	text-underline-offset: 2px;
-}
-
-/* ===== BADGES & TAGS ===== */
+/* ===== CHIPS ===== */
+/* Tags, platforms, attestations and severities are all the same chip: one
+   size, a soft wash, dark text of the same hue. */
 .badge,
 .tag,
 .tag-standalone,
@@ -486,153 +691,151 @@ a:hover {
 .severity {
 	display: inline-flex;
 	align-items: center;
-	padding: 0.2rem 0.4rem;
-	border-radius: 3px;
-	font-size: 0.6875rem;
+	padding: 0.05rem 0.4rem;
+	border-radius: var(--radius-sm);
+	font-size: 0.75rem;
 	font-weight: 500;
-	line-height: 1;
+	line-height: 1.4;
+	white-space: nowrap;
 	vertical-align: middle;
-}
-
-.badge {
-	text-transform: uppercase;
-	letter-spacing: 0.02em;
-	font-weight: 600;
+	background: var(--chip-gray-bg);
+	color: var(--chip-gray-fg);
 }
 
 .badge.pull-through {
-	background: var(--color-secondary);
-	color: #ffffff;
+	background: var(--chip-purple-bg);
+	color: var(--chip-purple-fg);
 }
 
 .badge.immutable {
-	background: var(--color-warning);
-	color: #ffffff;
+	background: var(--chip-yellow-bg);
+	color: var(--chip-yellow-fg);
 }
 
+.badge.backoff {
+	margin-left: 0.4rem;
+	background: var(--chip-yellow-bg);
+	color: var(--chip-yellow-fg);
+}
+
+.tag,
+.tag-standalone {
+	background: var(--chip-cyan-bg);
+	color: var(--chip-cyan-fg);
+	text-decoration: none;
+}
+
+a.tag:hover,
+a.tag-standalone:hover {
+	text-decoration: none;
+	filter: brightness(0.94);
+}
+
+.tag-standalone {
+	margin: 0.1rem 0.2rem 0.1rem 0;
+}
+
+/* A tag with its delete control: one chip, the cross on its right edge. */
 .tag-with-delete {
 	display: inline-flex;
 	align-items: stretch;
-	border-radius: 3px;
+	margin: 0.1rem 0.2rem 0.1rem 0;
+	border-radius: var(--radius-sm);
 	overflow: hidden;
-}
-
-.tag {
-	background: var(--color-primary);
-	color: #ffffff;
-	border-radius: 0;
-	text-decoration: none;
-}
-
-.tag:hover {
-	background: var(--color-primary-dark);
-	text-decoration: none;
+	vertical-align: middle;
 }
 
 .tag-with-delete .tag {
 	border-radius: 0;
 }
 
-.tag-standalone {
-	background: var(--color-primary);
-	color: #ffffff;
-	margin: 0.1rem;
-	text-decoration: none;
-}
-
-.tag-standalone:hover {
-	background: var(--color-primary-dark);
-	text-decoration: none;
-}
-
 .tag-delete {
 	display: inline-flex;
 	align-items: center;
-	justify-content: center;
-	background: var(--color-primary-dark);
-	color: #ffffff;
-	border: none;
-	padding: 0.2rem 0.35rem;
+	padding: 0 0.35rem;
 	border-radius: 0;
-	font-size: 0.6875rem;
+	background: var(--chip-cyan-bg);
+	color: var(--chip-cyan-fg);
+	font-size: 0.75rem;
 	line-height: 1;
-	cursor: pointer;
-	transition: background 0.15s ease;
+	box-shadow: none;
+	opacity: 0.7;
 }
 
 .tag-delete:hover {
-	background: var(--color-error);
+	background: var(--chip-cyan-bg);
+	opacity: 1;
 }
 
-.tag-delete.danger {
-	background: var(--color-error);
+.tag-delete.danger,
+.tag-delete.danger:hover {
+	background: var(--danger);
+	color: #fff;
+	opacity: 1;
 }
 
 .platform {
-	background: var(--color-secondary);
-	color: #ffffff;
 	font-family: var(--font-mono);
+	font-size: 0.7rem;
 }
 
 .attestation-slsa {
-	background: #9333ea;
-	color: #ffffff;
+	background: var(--chip-purple-bg);
+	color: var(--chip-purple-fg);
 }
 
 .attestation-sbom {
-	background: #0ea5e9;
-	color: #ffffff;
+	background: var(--chip-blue-bg);
+	color: var(--chip-blue-fg);
 }
 
 .attestation-signature {
-	background: var(--color-success);
-	color: #ffffff;
+	background: var(--chip-green-bg);
+	color: var(--chip-green-fg);
 }
 
 .attestation-vuln {
-	background: #d97706;
-	color: #ffffff;
+	background: var(--chip-orange-bg);
+	color: var(--chip-orange-fg);
 }
 
-/* ===== SCAN SUMMARY ===== */
 .scan-summary {
 	display: inline-flex;
-	flex-wrap: wrap;
 	gap: 0.25rem;
 	margin-left: 0.4rem;
 	vertical-align: middle;
 }
 
 .severity {
-	font-weight: 600;
-	color: #ffffff;
 	text-transform: capitalize;
 }
 
 .severity-critical {
-	background: #7f1d1d;
+	background: var(--chip-red-bg);
+	color: var(--chip-red-fg);
 }
 
 .severity-high {
-	background: #dc2626;
+	background: var(--chip-orange-bg);
+	color: var(--chip-orange-fg);
 }
 
 .severity-medium {
-	background: #d97706;
+	background: var(--chip-yellow-bg);
+	color: var(--chip-yellow-fg);
 }
 
 .severity-low {
-	background: #2563eb;
-}
-
-.severity-unknown {
-	background: var(--color-text-muted);
+	background: var(--chip-blue-bg);
+	color: var(--chip-blue-fg);
 }
 
 .severity-clean {
-	background: var(--color-success);
+	background: var(--chip-green-bg);
+	color: var(--chip-green-fg);
 }
 
+/* ===== MANIFEST PAGE ===== */
 .manifest-header {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
@@ -640,68 +843,64 @@ a:hover {
 	align-items: start;
 }
 
-@media (max-width: 800px) {
-	.manifest-header {
-		grid-template-columns: 1fr;
-	}
-}
-
 .scan-card {
 	min-width: 16rem;
 }
 
-/* The card is as narrow as its content, so the header's space-between has
-   nothing to distribute; the gap keeps the title off the meta text. */
 .scan-card .card-header {
 	gap: 1.5rem;
 }
 
-.scan-meta {
-	color: var(--color-text-muted);
-	font-size: 0.75rem;
-}
-
-.attestation-artifact {
-	background: var(--color-text-muted);
-	color: #ffffff;
-}
-
-/* ===== CONFIG PANEL ===== */
+/* Repository settings, as a definition list above the listing. */
 .config-panel {
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 0.25rem 1rem;
+	margin: 0 0 1rem;
+	padding: 0.75rem 0.875rem;
+	background: var(--surface);
+	border: 1px solid var(--border);
 	border-radius: var(--radius-lg);
-	padding: 1rem 1.25rem;
-	margin-bottom: 1.5rem;
-	display: flex;
-	flex-direction: column;
-	gap: 0.5rem;
+	font-size: 0.875rem;
 }
 
 .config-item {
-	display: flex;
-	align-items: baseline;
-	gap: 0.75rem;
-	flex-wrap: wrap;
+	display: contents;
 }
 
 .config-label {
-	color: var(--color-text-muted);
-	font-size: 0.875rem;
-	font-weight: 500;
+	color: var(--muted);
 }
 
 .config-value {
 	font-family: var(--font-mono);
-	font-size: 0.85rem;
+	font-size: 0.85em;
+	overflow-wrap: anywhere;
 }
 
 .config-value.enabled {
-	color: var(--color-success);
-	font-weight: 600;
+	color: var(--ok-fg);
 }
 
-/* ===== TREE STRUCTURE ===== */
+.toggle-annotations {
+	padding: 0 0.3rem;
+	margin-left: 0.4rem;
+	background: none;
+	box-shadow: none;
+	color: var(--muted);
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	font-weight: 400;
+}
+
+.toggle-annotations:hover {
+	background: var(--hover);
+	color: var(--text);
+}
+
+/* ===== TREE ===== */
+/* The manifest listing draws its index/platform/referrer nesting with guide
+   lines in the first cell; the rules are the border colour. */
 .has-children {
 	position: relative;
 	padding-left: 1.75rem;
@@ -713,7 +912,7 @@ a:hover {
 	left: calc(0.875rem - 0.5px);
 	top: 50%;
 	bottom: 0;
-	border-left: 1px solid var(--color-border);
+	border-left: 1px solid var(--border-strong);
 }
 
 .tree-branch {
@@ -727,8 +926,8 @@ a:hover {
 	left: calc(0.875rem - 0.5px);
 	top: 0;
 	bottom: 50%;
-	border-left: 1px solid var(--color-border);
-	border-bottom: 1px solid var(--color-border);
+	border-left: 1px solid var(--border-strong);
+	border-bottom: 1px solid var(--border-strong);
 	width: 1rem;
 }
 
@@ -743,7 +942,7 @@ a:hover {
 	left: calc(0.875rem - 0.5px);
 	top: 50%;
 	width: 1rem;
-	border-bottom: 1px solid var(--color-border);
+	border-bottom: 1px solid var(--border-strong);
 }
 
 .tree-branch.has-attestations .branch-line {
@@ -751,7 +950,7 @@ a:hover {
 	left: calc(1.875rem - 0.5px);
 	top: 50%;
 	bottom: 0;
-	border-left: 1px solid var(--color-border);
+	border-left: 1px solid var(--border-strong);
 }
 
 .nested-tree-branch {
@@ -764,7 +963,7 @@ a:hover {
 	left: calc(0.875rem - 0.5px);
 	top: 0;
 	bottom: 0;
-	border-left: 1px solid var(--color-border);
+	border-left: 1px solid var(--border-strong);
 }
 
 .nested-tree-branch::before {
@@ -773,8 +972,8 @@ a:hover {
 	left: calc(1.875rem - 0.5px);
 	top: 0;
 	bottom: 50%;
-	border-left: 1px solid var(--color-border);
-	border-bottom: 1px solid var(--color-border);
+	border-left: 1px solid var(--border-strong);
+	border-bottom: 1px solid var(--border-strong);
 	width: 1rem;
 }
 
@@ -789,24 +988,29 @@ a:hover {
 	left: calc(1.875rem - 0.5px);
 	top: 50%;
 	width: 1rem;
-	border-bottom: 1px solid var(--color-border);
+	border-bottom: 1px solid var(--border-strong);
 }
 
-/* ===== TREE TOGGLE ===== */
+/* The expander is a small box with + or −, a dot for a leaf. */
 .tree-toggle {
 	position: absolute;
 	left: 0;
 	top: 0;
 	bottom: 0;
-	border: none;
+	padding: 0;
+	border-radius: 0;
 	background: transparent;
-	color: var(--color-text-muted);
+	box-shadow: none;
+	color: var(--muted);
+	font-family: var(--font-mono);
 	font-size: 0.7rem;
 	line-height: 1;
-	cursor: pointer;
-	padding: 0;
-	font-family: var(--font-mono);
 	z-index: 1;
+}
+
+.tree-toggle:hover {
+	background: transparent;
+	color: var(--text);
 }
 
 .tree-toggle::before {
@@ -816,16 +1020,16 @@ a:hover {
 	transform: translateY(-50%);
 	width: 14px;
 	height: 14px;
-	border: 1px solid var(--color-border);
-	background: var(--color-bg);
-	border-radius: 3px;
+	border: 1px solid var(--accent);
+	background: var(--accent-soft);
+	border-radius: var(--radius-sm);
 }
 
 .tree-toggle.leaf::before {
 	width: 6px;
 	height: 6px;
 	border: none;
-	background: var(--color-border);
+	background: var(--accent);
 	border-radius: 50%;
 }
 
@@ -836,6 +1040,7 @@ a:hover {
 	width: 14px;
 	text-align: center;
 	font-weight: 600;
+	color: var(--accent-hover);
 }
 
 .has-children .toggle-icon {
@@ -887,154 +1092,6 @@ a:hover {
 }
 
 /* ===== MISC ===== */
-.actions {
-	display: flex;
-	gap: 0.5rem;
-}
-
-.clickable {
-	cursor: pointer;
-}
-
-.clickable:hover td {
-	background: rgba(8, 145, 178, 0.08);
-	background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-}
-
-.untagged {
-	color: var(--color-text-muted);
-	font-style: italic;
-}
-
-.no-features {
-	color: var(--color-text-muted);
-}
-
-.child-row {
-	background: var(--color-surface);
-}
-
-.uuid {
-	font-family: var(--font-mono);
-	font-size: 0.85em;
-}
-
-.label {
-	color: var(--color-text-muted);
-	width: 100px;
-}
-
-.total-label {
-	text-align: right;
-	color: var(--color-text-muted);
-	font-weight: 600;
-}
-
-.annotations-row {
-	background: var(--color-surface);
-}
-
-.annotations-row td {
-	padding-left: 1.5rem;
-}
-
-.annotation {
-	display: inline-block;
-	margin-right: 1rem;
-	font-size: 0.85rem;
-}
-
-.annotation-key {
-	color: var(--color-text-muted);
-}
-
-.toggle-annotations {
-	background: none;
-	border: none;
-	color: var(--color-text-muted);
-	font-family: var(--font-mono);
-	font-size: 0.85rem;
-	padding: 0.125rem 0.375rem;
-	margin-left: 0.5rem;
-	cursor: pointer;
-	border-radius: var(--radius-sm);
-}
-
-.toggle-annotations:hover {
-	color: var(--color-primary);
-	background: rgba(8, 145, 178, 0.1);
-	background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-	transform: none;
-}
-
-.subject-meta {
-	color: var(--color-text-muted);
-	font-size: 0.85rem;
-	margin-left: 0.5rem;
-}
-
-.filename {
-	font-family: var(--font-mono);
-	color: var(--color-text);
-}
-
-/* Makes a drill-down row reachable by keyboard without recolouring the cell,
-   which a row onclick alone cannot do. */
-.row-link {
-	color: inherit;
-	text-decoration: none;
-}
-
-.row-link:hover {
-	text-decoration: underline;
-}
-
-.action-error {
-	margin-bottom: 1rem;
-	padding: 0.6rem 0.9rem;
-	border: 1px solid var(--color-warning, #b45309);
-	border-radius: 6px;
-	color: var(--color-warning, #b45309);
-	font-size: 0.9rem;
-}
-
-.download-link {
-	font-size: 0.85rem;
-	background: none;
-	border: none;
-	color: var(--color-primary);
-	padding: 0;
-	cursor: pointer;
-	font-family: var(--font-mono);
-}
-
-.download-link:hover {
-	text-decoration: underline;
-	background: none;
-	transform: none;
-}
-
-.col-narrow {
-	width: 80px;
-}
-
-.col-medium {
-	width: 120px;
-}
-
-.col-wide {
-	width: 200px;
-}
-
-.col-actions {
-	width: 140px;
-}
-
-.col-select {
-	width: 36px;
-}
-
-/* ===== SCROLLBAR ===== */
 ::-webkit-scrollbar {
 	width: 8px;
 	height: 8px;
@@ -1045,42 +1102,32 @@ a:hover {
 }
 
 ::-webkit-scrollbar-thumb {
-	background: var(--color-border);
+	background: var(--border-strong);
 	border-radius: 4px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-	background: var(--color-text-muted);
+@media (prefers-reduced-motion: reduce) {
+	* {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
 }
 
-/* ===== RESPONSIVE ===== */
-@media (max-width: 768px) {
-	.container {
-		padding: 0.75rem 1rem;
-	}
-
-	header h1 {
-		font-size: 1.1rem;
-	}
-
-	.header-left {
-		gap: 1rem;
-	}
-
-	nav a {
-		padding: 0.375rem 0.5rem;
-		font-size: 0.8rem;
+@media (max-width: 48rem) {
+	.manifest-header {
+		grid-template-columns: 1fr;
 	}
 
 	table {
-		font-size: 0.75rem;
+		font-size: 0.8125rem;
 	}
 
-	th, td {
+	th,
+	td {
 		padding: 0.35rem 0.5rem;
 	}
 
-	th {
-		padding: 0.3rem 0.5rem;
+	.label {
+		width: auto;
 	}
 }

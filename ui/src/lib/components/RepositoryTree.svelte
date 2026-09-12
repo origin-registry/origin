@@ -119,7 +119,7 @@
 							/>
 						</td>
 						<td><code class="uuid">{upload.uuid}</code></td>
-						<td>{formatSize(upload.size)}</td>
+						<td class="nowrap">{formatSize(upload.size)}</td>
 						<td>{formatTimeAgo(upload.started_at)}</td>
 						<td>
 							<DeleteButton

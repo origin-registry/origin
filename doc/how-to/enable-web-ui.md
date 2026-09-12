@@ -144,7 +144,7 @@ Click a delete button once to arm, click again to confirm.
 
 ### Theme Toggle
 
-Switch between dark and light themes using the header button. Preference is saved in browser storage.
+Switch between light, dark and system themes with the switcher at the right of the top bar. Preference is saved in browser storage.
 
 ### ORAS Artifacts
 

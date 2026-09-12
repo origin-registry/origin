@@ -10,11 +10,18 @@
 	import ManifestView from '$lib/components/ManifestView.svelte';
 	import RepositoryTree from '$lib/components/RepositoryTree.svelte';
 	import Card from '$lib/components/Card.svelte';
+	import CopyButton from '$lib/components/CopyButton.svelte';
 	import type { BrowseParams } from './+page';
 
 	let { data }: { data: BrowseParams } = $props();
 
 	const isManifestView = $derived(data.reference !== null);
+	// The page's name as it is pulled: a tag after a colon, a digest after an at.
+	const fullName = $derived(
+		data.reference === null
+			? data.path
+			: `${data.path}${data.reference.startsWith('sha256:') ? '@' : ':'}${data.reference}`
+	);
 	// The path below the owning repository, which is what the breadcrumb splits on.
 	const relativePath = $derived(
 		data.repository !== null && data.path.length > data.repository.length
@@ -56,6 +63,15 @@
 	// Monotonic token: each load claims the next value, so a slow response from
 	// a superseded load is discarded instead of overwriting the current view.
 	let loadToken = 0;
+
+	// What the path holds, for the lede: a prefix has namespaces, a leaf has
+	// manifests, and a nested name may have both.
+	const summary = $derived.by(() => {
+		const parts = [];
+		if (children.length > 0) parts.push(`${children.length} namespace${children.length === 1 ? '' : 's'}`);
+		if (rows.length > 0) parts.push(`${rows.length} manifest${rows.length === 1 ? '' : 's'}`);
+		return parts.join(', ') || 'Nothing here yet';
+	});
 
 	function toggleExpand(digest: string, event: MouseEvent) {
 		event.stopPropagation();
@@ -299,6 +315,14 @@
 	...(isManifestView ? [{ label: data.reference ?? '' }] : [])
 ]} />
 
+<div class="title" class:digest={data.reference?.startsWith('sha256:')}>
+	<h1>{data.path}{#if isManifestView}<span class="reference">{fullName.slice(data.path.length)}</span>{/if}</h1>
+	<CopyButton text={fullName} label={isManifestView ? 'Copy the reference' : 'Copy the namespace'} />
+</div>
+{#if !isManifestView}
+	<p class="lede">{loading ? '\u00a0' : summary}</p>
+{/if}
+
 {#if actionError}
 	<div class="action-error">{actionError}</div>
 {/if}
@@ -374,6 +398,9 @@
 		</Card>
 	{/if}
 
+	<!-- A pure prefix lists its namespaces alone; the manifest table appears
+	     when the path holds manifests or uploads, or nothing at all. -->
+	{#if rows.length > 0 || uploads.length > 0 || children.length === 0}
 	<RepositoryTree
 		path={data.path}
 		{rows}
@@ -390,4 +417,26 @@
 		onuploadselectionchange={(selected) => selectedUploads = selected}
 		oncancelselecteduploads={cancelSelectedUploads}
 	/>
+	{/if}
 {/if}
+
+<style>
+	.title {
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		margin-bottom: 1.25rem;
+	}
+	.title h1 {
+		margin: 0;
+		min-width: 0;
+	}
+	/* The reference reads lighter than the name it follows; a digest is long
+	   enough that the whole line steps down a size to stay one line. */
+	.reference {
+		font-weight: 400;
+	}
+	.title.digest h1 {
+		font-size: 1.25rem;
+	}
+</style>
