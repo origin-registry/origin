@@ -527,15 +527,16 @@ jobs:
             ${CONFORMANCE_IMAGE_NAME} -c /backend.toml -c /overlay-scan.toml server
 
           # The service reads [scanner] alone, so the overlay is its whole
-          # configuration. The scanner fetches its database on the first scan.
+          # configuration. Grype pulls its database before listening, Trivy on
+          # the first scan.
           docker run -d --network host --name angos-scanner -e RUST_LOG=info \
             -v "$PWD/conformance/e2e/overlay-scan.toml:/overlay-scan.toml" \
             ${CONFORMANCE_IMAGE_NAME}-${{ matrix.scanner }} -c /overlay-scan.toml scanner ${{ matrix.scanner }}
           scanner_log() { docker logs angos-scanner 2>&1; }
 
-          for i in $(seq 1 30); do
+          for i in $(seq 1 150); do
             curl -sf -o /dev/null http://127.0.0.1:8000/v2/ && scanner_log | grep -q "listening on" && break
-            [ "$i" -eq 30 ] && { echo "angos or the scanner service did not start"; docker logs angos-scan; scanner_log; exit 1; }
+            [ "$i" -eq 150 ] && { echo "angos or the scanner service did not start"; docker logs angos-scan; scanner_log; exit 1; }
             sleep 1
           done
 

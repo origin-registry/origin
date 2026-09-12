@@ -9,7 +9,7 @@ mod tool;
 pub use config::ScannerConfig;
 pub use tool::Scanner;
 
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 
 use argh::FromArgs;
 use bytes::Bytes;
@@ -17,7 +17,12 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Method, Request, Response, StatusCode, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
-use tokio::{net::TcpListener, signal, sync::Semaphore};
+use tokio::{
+    net::TcpListener,
+    signal,
+    sync::{RwLock, Semaphore},
+    time::sleep,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{configuration::ObservabilityConfig, scan::ScanImagePayload, secret::Secret};
@@ -25,6 +30,9 @@ use crate::{configuration::ObservabilityConfig, scan::ScanImagePayload, secret::
 /// A scan request names one image; cap the read well above that so a hostile
 /// body cannot exhaust memory.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
+/// How often the service pulls the database of a scanner that owns one.
+const DATABASE_REFRESH: Duration = Duration::from_hours(24);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -69,6 +77,8 @@ struct Service {
     plain_http: bool,
     credentials: Option<(String, String)>,
     scans: Arc<Semaphore>,
+    /// Held shared by a scan and exclusively while the database is replaced.
+    database: RwLock<()>,
 }
 
 pub async fn run(options: &Options, config: Option<ScannerConfig>) -> Result<(), Error> {
@@ -101,7 +111,12 @@ pub async fn run(options: &Options, config: Option<ScannerConfig>) -> Result<(),
         plain_http: config.registry.url.starts_with("http://"),
         credentials,
         scans: Arc::new(Semaphore::new(permits)),
+        database: RwLock::new(()),
     });
+    if service.scanner.owns_database() {
+        update_database(&service).await?;
+        tokio::spawn(refresh_database(service.clone()));
+    }
     let address = format!("{}:{}", config.bind_address, config.port);
     let address: SocketAddr = address
         .parse()
@@ -144,6 +159,28 @@ async fn serve(address: SocketAddr, service: Arc<Service>) -> Result<(), Error> 
     }
 }
 
+/// Pulls the scanner's database, keeping scans out while it is replaced.
+async fn update_database(service: &Service) -> Result<(), Error> {
+    let _exclusive = service.database.write().await;
+    service.scanner.update_database().await?;
+    info!("Updated the {} database", service.scanner.as_str());
+    Ok(())
+}
+
+/// Refreshes the database once a day; a failed refresh keeps the previous
+/// database and is retried the next day.
+async fn refresh_database(service: Arc<Service>) {
+    loop {
+        sleep(DATABASE_REFRESH).await;
+        if let Err(e) = update_database(&service).await {
+            error!(
+                "Failed to refresh the {} database: {e}",
+                service.scanner.as_str()
+            );
+        }
+    }
+}
+
 async fn shutdown_signal() {
     if let Err(e) = signal::ctrl_c().await {
         error!("Failed to listen for shutdown signal: {e}");
@@ -180,6 +217,7 @@ async fn handle(
         "{}/{}@{}",
         service.registry_authority, payload.namespace, payload.digest
     );
+    let _database = service.database.read().await;
     let Ok(_permit) = service.scans.acquire().await else {
         return Ok(text_response(StatusCode::SERVICE_UNAVAILABLE, ""));
     };

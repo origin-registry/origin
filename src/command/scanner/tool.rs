@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{process::Output, str::FromStr};
 
 use tokio::process::Command;
 
@@ -22,6 +22,14 @@ impl Scanner {
         matches!(self, Scanner::Trivy)
     }
 
+    /// Whether the service keeps the scanner's vulnerability database fresh:
+    /// Grype is told not to update during a scan, so the service pulls the
+    /// database at start and once a day; Trivy refreshes its own.
+    #[must_use]
+    pub fn owns_database(self) -> bool {
+        matches!(self, Scanner::Grype)
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -43,6 +51,29 @@ impl Scanner {
         self.arguments(&mut command, image_ref);
         self.environment(&mut command, image_ref, plain_http, credentials);
 
+        let output = self.run(command).await?;
+        if output.stdout.is_empty() {
+            return Err(Error::Scanner {
+                scanner: self.as_str(),
+                message: "produced no SARIF output".to_string(),
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    /// Pulls the vulnerability database of a scanner that [`owns_database`].
+    ///
+    /// [`owns_database`]: Scanner::owns_database
+    pub async fn update_database(self) -> Result<(), Error> {
+        if self.owns_database() {
+            let mut command = Command::new(self.as_str());
+            command.args(["db", "update"]);
+            self.run(command).await?;
+        }
+        Ok(())
+    }
+
+    async fn run(self, mut command: Command) -> Result<Output, Error> {
         let output = command.output().await.map_err(|e| Error::Scanner {
             scanner: self.as_str(),
             message: format!("failed to run: {e}"),
@@ -54,13 +85,7 @@ impl Scanner {
                 message: format!("exited with {}: {}", output.status, stderr.trim()),
             });
         }
-        if output.stdout.is_empty() {
-            return Err(Error::Scanner {
-                scanner: self.as_str(),
-                message: "produced no SARIF output".to_string(),
-            });
-        }
-        Ok(output.stdout)
+        Ok(output)
     }
 
     fn arguments(self, command: &mut Command, image_ref: &str) {
@@ -92,6 +117,7 @@ impl Scanner {
         let authority = image_ref.split('/').next().unwrap_or(image_ref);
         match self {
             Scanner::Grype => {
+                command.env("GRYPE_DB_AUTO_UPDATE", "false");
                 if plain_http {
                     command.env("GRYPE_REGISTRY_INSECURE_USE_HTTP", "true");
                 }
@@ -159,6 +185,12 @@ mod tests {
     }
 
     #[test]
+    fn grype_owns_its_database_and_trivy_refreshes_its_own() {
+        assert!(Scanner::Grype.owns_database());
+        assert!(!Scanner::Trivy.owns_database());
+    }
+
+    #[test]
     fn scanner_names_parse_and_nothing_else_does() {
         assert_eq!("grype".parse::<Scanner>(), Ok(Scanner::Grype));
         assert_eq!("trivy".parse::<Scanner>(), Ok(Scanner::Trivy));
@@ -182,6 +214,10 @@ mod tests {
         assert_eq!(
             argv(&command),
             ["-o", "sarif", &format!("registry:{image}")]
+        );
+        assert_eq!(
+            env(&command, "GRYPE_DB_AUTO_UPDATE").as_deref(),
+            Some("false")
         );
         assert_eq!(
             env(&command, "GRYPE_REGISTRY_INSECURE_USE_HTTP").as_deref(),

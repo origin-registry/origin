@@ -128,7 +128,7 @@ It enqueues one job per image manifest without a report; `--dry-run` lists them,
 
 ## Notes
 
-- **Keep the scanner's database fresh.** Trivy refreshes its own. Grype refuses a database older than five days, so leave its auto-update on and keep Grype itself current: an old release is tied to a retired database feed and never finds a newer one.
+- **The scanner's database.** The service pulls Grype's database when it starts, refusing to start without one, and refreshes it once a day; a scan never updates it. Trivy refreshes its own during scans. Keep the scanner itself current: an old release is tied to a retired database feed and never finds a newer one.
 - **Trivy scans one image at a time.** It locks its cache directory, so the service ignores `max_concurrent_scans` for Trivy; run several services on several hosts to scan in parallel. Grype scans concurrently.
 - **The scanner service is stateless.** `POST /scan` with `{"namespace": ..., "digest": ...}` answers the SARIF report; the service holds only its pull identity and can be scaled or replaced independently of the registry.
 - **The report is a plain OCI artifact.** An empty config, one SARIF layer, `artifactType: application/sarif+json`, and the image as `subject`. Nothing is written under cosign's fallback tags, so nothing counts against `top_pushed` and `top_pulled` rankings.
