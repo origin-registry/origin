@@ -54,7 +54,7 @@ token = "scan-service-secret"
 scan = true
 ```
 
-Each `scan = true` repository sends its image pushes to the service at `url`. Leave pull-through cache repositories without the flag: a mirror's content is not yours to annotate, and every cache fill would be scanned.
+Each `scan = true` repository sends its image pushes to the service at `url`. A pull-through cache repository may carry the flag too: each image manifest a cache miss stores is scanned once, and the report is local metadata that retention reclaims with the cached image. On a busy general-purpose mirror that is one scan per upstream digest pulled, so weigh the scanner time before enabling it there.
 
 ## Step 3: Run the Scanner Service
 

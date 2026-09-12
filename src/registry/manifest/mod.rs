@@ -330,18 +330,24 @@ impl Registry {
             warn!("Cache-fill event delivery failed: {error}");
         }
 
-        self.store_manifest(
-            &StoreManifest {
-                namespace,
-                reference: &reference,
-                content_type: media_type.as_ref(),
-                created_tags: &[],
-                reference_policy: ReferencePolicy::Trusted,
-                created_at: None,
-            },
-            &content,
-        )
-        .await?;
+        let stored = self
+            .store_manifest(
+                &StoreManifest {
+                    namespace,
+                    reference: &reference,
+                    content_type: media_type.as_ref(),
+                    created_tags: &[],
+                    reference_policy: ReferencePolicy::Trusted,
+                    created_at: None,
+                },
+                &content,
+            )
+            .await?;
+        // A fill is a write like a push: an image landing in a scanning cache
+        // repository gets its scan, a refresh to the same digest does not.
+        if stored.changed && stored.scan_subject && repository.scan {
+            self.dispatch_scan(namespace, &stored.digest).await;
+        }
 
         Ok(ManifestBody {
             media_type,

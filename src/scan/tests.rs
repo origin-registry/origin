@@ -223,6 +223,89 @@ async fn a_failing_scanner_fails_the_job() {
     assert!(sarif_referrers(&stack, &namespace, &image).await.is_empty());
 }
 
+/// A cache miss on a `scan = true` pull-through repository enqueues one scan
+/// job for the image it stores; the hit that follows enqueues nothing more.
+#[tokio::test]
+async fn a_cache_miss_enqueues_a_scan_job_in_a_scanning_pull_through_repository() {
+    use angos_oci::{MediaRange, MediaType, Reference, Tag};
+
+    use crate::{
+        cache,
+        registry::repository::{Config as RepositoryConfig, Repository},
+        test_fixtures::client::test_client_config,
+    };
+
+    let stack = fs_test_stack();
+    let namespace = Namespace::new("mirror/web").unwrap();
+    let job_store = Arc::new(JobStore::new(
+        stack.store.clone(),
+        "scan-test",
+        ClaimMode::Atomic,
+    ));
+    let upstream = MockServer::start().await;
+    let image = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000001","size":1},"layers":[]}"#;
+    // The upstream sees the path below the repository prefix; the HEAD answers
+    // the freshness check a second pull of the mutable tag makes.
+    let digest = Digest::sha256_of_bytes(image.as_bytes());
+    for verb in ["GET", "HEAD"] {
+        Mock::given(method(verb))
+            .and(path("/v2/web/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(image)
+                    .insert_header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+                    .insert_header("Docker-Content-Digest", digest.to_string()),
+            )
+            .mount(&upstream)
+            .await;
+    }
+    let repository = Repository::new(
+        "mirror",
+        &RepositoryConfig {
+            upstream: vec![test_client_config(upstream.uri())],
+            scan: true,
+            ..Default::default()
+        },
+        &cache::Config::Memory.to_backend().unwrap(),
+        crate::registry::manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+    )
+    .await
+    .unwrap();
+    let resolver = single_repo_resolver("mirror", repository);
+    let registry = Registry::new(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+        resolver.clone(),
+        RegistryConfig::new(job_store.clone()),
+    );
+    let repository = resolver.resolve(&namespace).unwrap();
+    let accepted = [MediaRange::from(MediaType::oci_manifest())];
+    let latest = Tag::new("latest").unwrap();
+    let pull = || {
+        registry.get_manifest(
+            Some(repository),
+            &accepted,
+            &namespace,
+            Reference::Tag(latest.clone()),
+            false,
+            "test-client",
+        )
+    };
+
+    pull().await.unwrap();
+    assert_eq!(
+        job_store.count_pending(Queue::Scan, 0).await.unwrap(),
+        1,
+        "the fill stores an image, which is scanned"
+    );
+    pull().await.unwrap();
+    assert_eq!(
+        job_store.count_pending(Queue::Scan, 0).await.unwrap(),
+        1,
+        "a refresh to the same digest stores nothing and scans nothing"
+    );
+}
+
 /// A push into a `scan = true` repository enqueues one scan job for an image
 /// manifest and none for a report, while a repository without the flag
 /// enqueues nothing.
