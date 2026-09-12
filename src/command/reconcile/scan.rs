@@ -48,27 +48,10 @@ pub struct Options {
 /// Enqueues one scan per unreported image manifest of a `scan = true`
 /// repository; `force` drops the report check.
 pub struct ScanChecker {
-    blob_store: Arc<BlobStore>,
-    metadata_store: Arc<MetadataStore>,
-    resolver: Arc<RepositoryResolver>,
-    force: bool,
-}
-
-impl ScanChecker {
-    #[must_use]
-    pub fn new(
-        blob_store: Arc<BlobStore>,
-        metadata_store: Arc<MetadataStore>,
-        resolver: Arc<RepositoryResolver>,
-        force: bool,
-    ) -> Self {
-        Self {
-            blob_store,
-            metadata_store,
-            resolver,
-            force,
-        }
-    }
+    pub blob_store: Arc<BlobStore>,
+    pub metadata_store: Arc<MetadataStore>,
+    pub resolver: Arc<RepositoryResolver>,
+    pub force: bool,
 }
 
 #[async_trait]
@@ -106,12 +89,12 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         metadata_store,
         repositories,
     } = bootstrap::maintenance_context(config).await?;
-    let checker = ScanChecker::new(
-        blob_store.clone(),
-        metadata_store.clone(),
-        repositories,
-        options.force,
-    );
+    let checker = ScanChecker {
+        blob_store: blob_store.clone(),
+        metadata_store: metadata_store.clone(),
+        resolver: repositories,
+        force: options.force,
+    };
     let sink: Box<dyn ActionSink> = if options.dry_run {
         info!("Dry-run mode: no changes will be made to the storage");
         Box::new(DryRunSink)
@@ -179,22 +162,22 @@ mod tests {
 
         let mut repository = repository_with_replication("apps", Vec::new());
         repository.scan = true;
-        let checker = ScanChecker::new(
-            stack.blob_store.clone(),
-            stack.metadata_store.clone(),
-            single_repo_resolver("apps", repository),
-            false,
-        );
+        let checker = ScanChecker {
+            blob_store: stack.blob_store.clone(),
+            metadata_store: stack.metadata_store.clone(),
+            resolver: single_repo_resolver("apps", repository),
+            force: false,
+        };
         let sink = Mutex::new(Vec::new());
         checker.check(&namespace, &sink).await.unwrap();
         assert_eq!(enqueued(&sink), vec![(image.to_string(), false)]);
 
-        let checker = ScanChecker::new(
-            stack.blob_store.clone(),
-            stack.metadata_store.clone(),
-            single_repo_resolver("apps", repository_with_replication("apps", Vec::new())),
-            true,
-        );
+        let checker = ScanChecker {
+            blob_store: stack.blob_store.clone(),
+            metadata_store: stack.metadata_store.clone(),
+            resolver: single_repo_resolver("apps", repository_with_replication("apps", Vec::new())),
+            force: true,
+        };
         let sink = Mutex::new(Vec::new());
         checker.check(&namespace, &sink).await.unwrap();
         assert!(enqueued(&sink).is_empty(), "no scan = true, no scan");

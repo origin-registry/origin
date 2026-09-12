@@ -382,16 +382,7 @@ fn summary_counts_trivy_severities_from_rule_tags() {
     ]}]}"#;
     let summary = ScanSummary::of(report);
     assert_eq!(summary.scanner.as_deref(), Some("Trivy 0.74.0"));
-    assert_eq!(
-        (
-            summary.critical,
-            summary.high,
-            summary.medium,
-            summary.low,
-            summary.unknown
-        ),
-        (2, 0, 0, 1, 0)
-    );
+    assert_eq!(summary.counts, [2, 0, 0, 1, 0]);
 }
 
 /// Grype states the severity in the message and carries only a score on the
@@ -408,7 +399,7 @@ fn summary_reads_grype_messages_then_scores() {
         {"ruleId":"CVE-7-none","message":{"text":"found in image"}}
     ]}]}"#;
     let summary = ScanSummary::of(report);
-    assert_eq!((summary.medium, summary.high, summary.unknown), (1, 1, 1));
+    assert_eq!(summary.counts, [0, 1, 1, 0, 1]);
     assert_eq!(
         summary
             .annotations()

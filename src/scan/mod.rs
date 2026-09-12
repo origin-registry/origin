@@ -121,11 +121,8 @@ pub async fn already_reported(
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScanSummary {
     pub scanner: Option<String>,
-    pub critical: usize,
-    pub high: usize,
-    pub medium: usize,
-    pub low: usize,
-    pub unknown: usize,
+    /// Indexed by `Severity as usize`.
+    pub counts: [usize; 5],
 }
 
 impl ScanSummary {
@@ -160,45 +157,57 @@ impl ScanSummary {
                     rules.iter().find(|rule| rule["id"].as_str() == Some(id))
                 });
             let message = result["message"]["text"].as_str().unwrap_or_default();
-            match severity(rule, message) {
-                Severity::Critical => summary.critical += 1,
-                Severity::High => summary.high += 1,
-                Severity::Medium => summary.medium += 1,
-                Severity::Low => summary.low += 1,
-                Severity::Unknown => summary.unknown += 1,
-            }
+            summary.counts[severity(rule, message) as usize] += 1;
         }
         summary
     }
 
     /// The `io.angos.scan.*` annotations carrying this summary.
     pub fn annotations(&self) -> Vec<(String, String)> {
-        let mut annotations = vec![
-            (
-                "io.angos.scan.critical".to_string(),
-                self.critical.to_string(),
-            ),
-            ("io.angos.scan.high".to_string(), self.high.to_string()),
-            ("io.angos.scan.medium".to_string(), self.medium.to_string()),
-            ("io.angos.scan.low".to_string(), self.low.to_string()),
-            (
-                "io.angos.scan.unknown".to_string(),
-                self.unknown.to_string(),
-            ),
-        ];
-        if let Some(scanner) = &self.scanner {
-            annotations.push(("io.angos.scan.scanner".to_string(), scanner.clone()));
-        }
-        annotations
+        Severity::ALL
+            .iter()
+            .map(|severity| {
+                (
+                    format!("io.angos.scan.{}", severity.as_str()),
+                    self.counts[*severity as usize].to_string(),
+                )
+            })
+            .chain(
+                self.scanner
+                    .iter()
+                    .map(|scanner| ("io.angos.scan.scanner".to_string(), scanner.clone())),
+            )
+            .collect()
     }
 }
 
+#[derive(Clone, Copy)]
 enum Severity {
     Critical,
     High,
     Medium,
     Low,
     Unknown,
+}
+
+impl Severity {
+    const ALL: [Severity; 5] = [
+        Severity::Critical,
+        Severity::High,
+        Severity::Medium,
+        Severity::Low,
+        Severity::Unknown,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::High => "high",
+            Severity::Medium => "medium",
+            Severity::Low => "low",
+            Severity::Unknown => "unknown",
+        }
+    }
 }
 
 fn severity_word(word: &str) -> Option<Severity> {

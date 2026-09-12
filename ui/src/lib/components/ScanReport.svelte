@@ -73,8 +73,8 @@
 					<span class="severity severity-clean">no findings</span>
 				{/if}
 			</span>
-			{#if report.scanner}
-				<span class="scanner">{report.scanner}</span>
+			{#if report.summary.scanner}
+				<span class="scanner">{report.summary.scanner}</span>
 			{/if}
 		</div>
 		{#if shown.length > 0}

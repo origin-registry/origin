@@ -454,7 +454,6 @@ export interface Finding {
 }
 
 export interface ParsedReport {
-	scanner?: string;
 	findings: Finding[];
 	summary: ScanSummary;
 }
@@ -472,21 +471,17 @@ type SarifResult = {
 	message?: { text?: string };
 };
 
+const SEVERITY_WORDS: Record<string, Severity> = {
+	critical: 'critical',
+	high: 'high',
+	medium: 'medium',
+	moderate: 'medium',
+	low: 'low',
+	negligible: 'low'
+};
+
 function severityWord(word: string): Severity | null {
-	switch (word.toLowerCase()) {
-		case 'critical':
-			return 'critical';
-		case 'high':
-			return 'high';
-		case 'medium':
-		case 'moderate':
-			return 'medium';
-		case 'low':
-		case 'negligible':
-			return 'low';
-		default:
-			return null;
-	}
+	return SEVERITY_WORDS[word.toLowerCase()] ?? null;
 }
 
 // The scanner's own severity word when it states one (Trivy tags its rule,
@@ -548,7 +543,7 @@ export function parseSarif(document: unknown): ParsedReport {
 	const rank = (severity: Severity) => SEVERITIES.indexOf(severity);
 	findings.sort((a, b) => rank(a.severity) - rank(b.severity) || a.id.localeCompare(b.id));
 	const total = findings.length;
-	return { scanner, findings, summary: { scanner, counts, total } };
+	return { findings, summary: { scanner, counts, total } };
 }
 
 /** The newest vulnerability report among `referrers` that carries a summary. */

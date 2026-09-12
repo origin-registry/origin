@@ -334,16 +334,6 @@ export function blobUrl(namespace: string, digest: string): string {
 
 // A blob body as JSON, served by the registry itself rather than by a
 // presigned redirect the browser could not read across origins.
-export async function fetchBlobJson<T>(namespace: string, digest: string): Promise<FetchResult<T>> {
-	try {
-		const response = await fetch(blobUrl(namespace, digest), {
-			headers: { 'X-Angos-No-Redirect': '1' }
-		});
-		if (!response.ok) {
-			return { data: null, error: `HTTP ${response.status}` };
-		}
-		return { data: (await response.json()) as T, error: null };
-	} catch (e) {
-		return { data: null, error: e instanceof Error ? e.message : 'Request failed' };
-	}
+export function fetchBlobJson<T>(namespace: string, digest: string): Promise<FetchResult<T>> {
+	return fetchJson<T>(blobUrl(namespace, digest), { headers: { 'X-Angos-No-Redirect': '1' } });
 }

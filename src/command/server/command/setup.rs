@@ -97,8 +97,7 @@ fn spawn_in_process_loops(
     cache_loops: NonZeroUsize,
     replication_loops: NonZeroUsize,
 ) -> InProcessLoops {
-    let shutdown = CancellationToken::new();
-    let tracker = TaskTracker::new();
+    let loops = InProcessLoops::none();
 
     let cache_handler: Arc<dyn JobHandler> = Arc::new(CacheFillJobHandler::new(
         resolver.clone(),
@@ -106,14 +105,7 @@ fn spawn_in_process_loops(
         metadata_store.clone(),
         event_dispatcher,
     ));
-    for _ in 0..cache_loops.get() {
-        tracker.spawn(claim_loop(
-            job_store.clone(),
-            cache_handler.clone(),
-            Queue::Cache,
-            shutdown.clone(),
-        ));
-    }
+    loops.spawn(job_store, &cache_handler, Queue::Cache, cache_loops);
 
     let any_downstream = resolver
         .keys()
@@ -127,17 +119,15 @@ fn spawn_in_process_loops(
             blob_store.clone(),
             metadata_store.clone(),
         ));
-        for _ in 0..replication_loops.get() {
-            tracker.spawn(claim_loop(
-                job_store.clone(),
-                replication_handler.clone(),
-                Queue::Replication,
-                shutdown.clone(),
-            ));
-        }
+        loops.spawn(
+            job_store,
+            &replication_handler,
+            Queue::Replication,
+            replication_loops,
+        );
     }
 
-    InProcessLoops { shutdown, tracker }
+    loops
 }
 
 /// Resolve the registry-storage config once per (re)build.

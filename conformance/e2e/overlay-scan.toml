@@ -1,8 +1,9 @@
-# E2E overlay: an external scanner driven by the manifest.push webhook. A
-# hook on the host at 127.0.0.1:8766 scans the pushed image with Grype and
-# attaches the SARIF report as a referrer; retention keeps the report with
-# its image and reclaims both together. Passed as a second `-c` file, so its
-# [global]
+# E2E overlay for the scan queue: pushes into the "scan" repository enqueue a
+# scan job, the worker asks `angos scanner grype` on the host for the report
+# and attaches it as a referrer; retention keeps the report with its image and
+# reclaims both together. Passed as a second `-c` file after the backend one.
+# No grace, so a prune right after a delete reclaims immediately.
+[global]
 gc_grace_secs = 0
 
 [global.scan]

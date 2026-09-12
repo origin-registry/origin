@@ -30,11 +30,8 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub enum Error {
     #[error("no [scanner] configuration section is present")]
     MissingConfig,
-    #[error("invalid bind address {address}: {source}")]
-    BindAddress {
-        address: String,
-        source: std::net::AddrParseError,
-    },
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("scanner '{scanner}' failed: {message}")]
@@ -106,10 +103,9 @@ pub async fn run(options: &Options, config: Option<ScannerConfig>) -> Result<(),
         scans: Arc::new(Semaphore::new(permits)),
     });
     let address = format!("{}:{}", config.bind_address, config.port);
-    let address: SocketAddr = address.parse().map_err(|source| Error::BindAddress {
-        address: address.clone(),
-        source,
-    })?;
+    let address: SocketAddr = address
+        .parse()
+        .map_err(|e| Error::Invalid(format!("invalid bind address {address}: {e}")))?;
     serve(address, service).await
 }
 
