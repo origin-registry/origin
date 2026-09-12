@@ -90,7 +90,7 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#each shown as finding (finding.id + (finding.pkg ?? '') + (finding.installed ?? ''))}
+					{#each shown as finding}
 						<tr>
 							<td><span class="severity severity-{finding.severity}">{finding.severity}</span></td>
 							<td>
