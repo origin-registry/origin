@@ -180,10 +180,6 @@ export function manifestUrl(path: string, reference: string): string {
 }
 
 /** The page rendering the vulnerability report stored at `digest`. */
-export function scanUrl(path: string, digest: string): string {
-	return `${base}/scan/${path}@${digest}`;
-}
-
 export function digestConfirmKey(digest: string): string {
 	return `digest:${digest}`;
 }
@@ -517,6 +513,62 @@ export function sortedChildren(node: FsNode): FsNode[] {
 		const dirs = Number(b.kind === 'dir') - Number(a.kind === 'dir');
 		return dirs || a.name.localeCompare(b.name);
 	});
+}
+
+/** What a tree is narrowed to: a set of layers to focus, and a path fragment. */
+export interface FsMatcher {
+	layers: Set<number>;
+	text: string;
+}
+
+export function fsMatches(matcher: FsMatcher, node: FsNode): boolean {
+	return (
+		(matcher.layers.size === 0 || matcher.layers.has(node.layer)) &&
+		(matcher.text === '' || node.path.toLowerCase().includes(matcher.text))
+	);
+}
+
+/** A node stays in a narrowed tree when it or anything under it matches. */
+export function fsVisible(matcher: FsMatcher, node: FsNode): boolean {
+	return fsMatches(matcher, node) || [...node.children.values()].some((c) => fsVisible(matcher, c));
+}
+
+/** The parent folder's path, `''` at the top. */
+export function fsParent(path: string): string {
+	return path.slice(0, Math.max(path.lastIndexOf('/'), 0));
+}
+
+/**
+ * Where a symlink leads, through further links on the way, or null when it
+ * leaves the image or loops. Anything but a symlink is its own target.
+ */
+export function fsResolve(root: FsNode, node: FsNode, hops = 16): FsNode | null {
+	if (node.kind !== 'symlink' || !node.entry?.link) return node;
+	if (hops === 0) return null;
+	const link = node.entry.link;
+	const parts = [...(link.startsWith('/') ? [] : fsParent(node.path).split('/')), ...link.split('/')];
+	let current: FsNode | null = root;
+	for (const part of parts) {
+		if (!current || part === '' || part === '.') continue;
+		if (part === '..') {
+			current = fsNodeAt(root, fsParent(current.path));
+			continue;
+		}
+		const child: FsNode | undefined = current.children.get(part);
+		current = child ? fsResolve(root, child, hops - 1) : null;
+	}
+	return current;
+}
+
+/** The node at `path` under `root`, or the root when nothing is there. */
+export function fsNodeAt(root: FsNode, path: string): FsNode {
+	let node = root;
+	for (const name of path.split('/').filter(Boolean)) {
+		const child = node.children.get(name);
+		if (!child) return root;
+		node = child;
+	}
+	return node;
 }
 
 // ---- Vulnerability reports ----

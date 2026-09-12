@@ -29,11 +29,11 @@ Open any image manifest in the web UI. Its page ends with a Filesystem panel. An
 
 ## Step 2: Browse
 
-Folders open on click. The layer column names the layer that last set each entry, `L1` being the lowest. Pick a layer in the selector to see only what that layer added, changed or removed, the removed paths struck through, or type in the filter to narrow the tree to matching paths.
+Folders open on click, as a tree in the list view or as tiles walked with the folder path in the icon view. The layer column names the layer that last set each entry, `L1` being the lowest. Check one or more layers in the layers menu to see only what those layers added, changed or removed, the removed paths struck through, or type in the filter to narrow the tree to matching paths.
 
 ## Step 3: Open a File
 
-Click a file to read it under the tree, up to 512 KiB, or download it whatever its size. A hard link opens its target; a symlink shows where it points.
+Click a file to read it under the tree, up to 512 KiB, or download it whatever its size. A hard link opens its target. A symlink shows where it points and, clicked, is followed there, through any links on the way; one that leads out of the image says so.
 
 ## Step 4: Index on Push
 
