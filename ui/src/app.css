@@ -288,6 +288,12 @@ td {
 	border-bottom: 1px solid var(--border);
 }
 
+/* A media type has no break opportunity; when the row is short of room it
+   breaks rather than pushing the last columns out of the panel. */
+td {
+	overflow-wrap: anywhere;
+}
+
 th {
 	font-weight: 500;
 	font-size: 0.8125rem;

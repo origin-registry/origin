@@ -357,7 +357,7 @@
 									href={manifestUrl(path, ref.digest)}
 								/>
 							</td>
-							<td>
+							<td class="nowrap">
 								<AttestationBadge type={getAttestationType(ref)} />
 								<ScanSummary annotations={ref.annotations} />
 							</td>
@@ -405,7 +405,7 @@
 						<td>
 							<DigestLink digest={ref.digest} href={manifestUrl(path, ref.digest)} />
 						</td>
-						<td>
+						<td class="nowrap">
 							<AttestationBadge type={getAttestationType(ref)} />
 							<ScanSummary annotations={ref.annotations} />
 						</td>
