@@ -1,9 +1,11 @@
 //! `angos reconcile index`: enqueues an index job for every tar layer of an
 //! image in an `index = true` repository that has no listing yet, or for
-//! every layer with `--force`. The running server or a worker drains the
-//! jobs. Any image indexes itself the first time its filesystem is opened,
-//! so this is for having the listings ready ahead of that, or for walking
-//! layers again after a change to what a listing holds.
+//! every layer with `--force`, and reclaims the listings of every other
+//! layer. The running server or a worker drains the jobs. Any image indexes
+//! itself the first time its filesystem is opened, so this is for having the
+//! listings ready ahead of that, for walking layers again after a change to
+//! what a listing holds, and for dropping what on-demand opens left behind
+//! in repositories that do not index.
 
 use std::{
     collections::HashSet,
@@ -27,12 +29,16 @@ use crate::{
             check,
             check::NamespaceChecker,
             executor::{ActionSink, DryRunSink, Executor, run_job_store},
+            walk::for_each_key,
         },
     },
     configuration::Configuration,
     layer::{IndexLayerPayload, filesystem_layers, read_listing},
     registry::{
-        blob_store::BlobStore, manifest::read_manifest, metadata_store::MetadataStore,
+        blob_store::BlobStore,
+        keys::{LAYERS_ROOT, parse_layer_key},
+        manifest::read_manifest,
+        metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
     },
 };
@@ -41,7 +47,7 @@ use crate::{
 #[argh(
     subcommand,
     name = "index",
-    description = "Enqueue filesystem indexing for layers without a listing, or for every layer with --force"
+    description = "Enqueue filesystem indexing for layers without a listing, or for every layer with --force, and reclaim the listings no index = true repository uses"
 )]
 pub struct Options {
     #[argh(switch, short = 'd')]
@@ -53,13 +59,16 @@ pub struct Options {
 }
 
 /// Enqueues one index job per unlisted tar layer of the images of an
-/// `index = true` repository; `force` drops the listing check. A layer
-/// shared by several images is enqueued once per run.
+/// `index = true` repository; `force` drops the listing check, `enqueue`
+/// off only collects. A layer shared by several images is enqueued once per
+/// run, and `seen` ends up holding every layer those repositories use, the
+/// ones whose listing is kept.
 pub struct IndexChecker {
     pub blob_store: Arc<BlobStore>,
     pub metadata_store: Arc<MetadataStore>,
     pub resolver: Arc<RepositoryResolver>,
     pub force: bool,
+    pub enqueue: bool,
     pub seen: Mutex<HashSet<Digest>>,
 }
 
@@ -81,7 +90,7 @@ impl NamespaceChecker for IndexChecker {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(layer.clone());
-                if !first {
+                if !first || !self.enqueue {
                     continue;
                 }
                 if !self.force && read_listing(&self.metadata_store, &layer).await?.is_some() {
@@ -99,6 +108,72 @@ impl NamespaceChecker for IndexChecker {
     }
 }
 
+/// Reclaims the listing of every layer outside `kept`: one an image indexed
+/// on demand comes back the next time the image is opened.
+async fn reclaim_listings(
+    metadata_store: &Arc<MetadataStore>,
+    kept: &HashSet<Digest>,
+    sink: &dyn ActionSink,
+) -> Result<(), Error> {
+    let unwanted = Mutex::new(HashSet::new());
+    let found = &unwanted;
+    for_each_key(
+        metadata_store.object_store(),
+        LAYERS_ROOT,
+        1,
+        |key| async move {
+            if let Some(digest) = parse_layer_key(&key).filter(|digest| !kept.contains(digest)) {
+                found
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(digest);
+            }
+        },
+    )
+    .await?;
+    for digest in unwanted
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
+        sink.apply(Action::ReclaimListing(digest)).await?;
+    }
+    Ok(())
+}
+
+/// Walks every namespace with `checker`, then reclaims the listings of the
+/// layers it did not see in an `index = true` repository.
+async fn check_and_reclaim(
+    checker: IndexChecker,
+    metadata_store: &Arc<MetadataStore>,
+    sink: &dyn ActionSink,
+) -> Result<(), Error> {
+    check::check_namespaces(metadata_store, &checker, sink, 1).await?;
+    let kept = checker
+        .seen
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    reclaim_listings(metadata_store, &kept, sink).await
+}
+
+/// Reclaims the listings no `index = true` repository uses, enqueueing
+/// nothing: what `angos scrub` runs after its walk.
+pub async fn reclaim_unused_listings(
+    blob_store: Arc<BlobStore>,
+    metadata_store: &Arc<MetadataStore>,
+    resolver: Arc<RepositoryResolver>,
+    sink: &dyn ActionSink,
+) -> Result<(), Error> {
+    let checker = IndexChecker {
+        blob_store,
+        metadata_store: metadata_store.clone(),
+        resolver,
+        force: false,
+        enqueue: false,
+        seen: Mutex::new(HashSet::new()),
+    };
+    check_and_reclaim(checker, metadata_store, sink).await
+}
+
 pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error> {
     let bootstrap::MaintenanceContext {
         blob_store,
@@ -110,6 +185,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         metadata_store: metadata_store.clone(),
         resolver: repositories,
         force: options.force,
+        enqueue: true,
         seen: Mutex::new(HashSet::new()),
     };
     let sink: Box<dyn ActionSink> = if options.dry_run {
@@ -122,7 +198,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
             run_job_store(&metadata_store, "reconcile"),
         ))
     };
-    check::check_namespaces(&metadata_store, &checker, sink.as_ref(), 1).await?;
+    check_and_reclaim(checker, &metadata_store, sink.as_ref()).await?;
     info!("Index reconciliation complete; the server or a worker drains the enqueued jobs");
     Ok(())
 }
@@ -133,9 +209,9 @@ mod tests {
 
     use bytes::Bytes;
 
-    use angos_oci::Namespace;
+    use angos_oci::{Digest, Namespace};
 
-    use super::IndexChecker;
+    use super::{IndexChecker, reclaim_listings};
     use crate::{
         command::maintenance::{action::Action, check::NamespaceChecker},
         registry::{
@@ -189,6 +265,7 @@ mod tests {
                 metadata_store: stack.metadata_store.clone(),
                 resolver: single_repo_resolver("apps", repository),
                 force,
+                enqueue: true,
                 seen: Mutex::new(HashSet::new()),
             }
         };
@@ -220,5 +297,44 @@ mod tests {
         let sink = Mutex::new(Vec::new());
         checker(true, true).check(&namespace, &sink).await.unwrap();
         assert_eq!(enqueued(&sink), vec![(layer.to_string(), true)]);
+    }
+
+    /// A listed layer no indexing repository uses is reclaimed, one they use
+    /// is kept.
+    #[tokio::test]
+    async fn reconcile_reclaims_listings_outside_indexing_repositories() {
+        let stack = fs_test_stack();
+        let store = stack.metadata_store.object_store();
+        let kept = Digest::sha256_of_bytes(b"kept layer");
+        let stray = Digest::sha256_of_bytes(b"stray layer");
+        for layer in [&kept, &stray] {
+            store
+                .put(&layer.layer_entries_path(), Bytes::from_static(b"{}"))
+                .await
+                .unwrap();
+            store
+                .put(&layer.layer_checkpoints_path(), Bytes::from_static(b"{}"))
+                .await
+                .unwrap();
+        }
+
+        let sink = Mutex::new(Vec::new());
+        reclaim_listings(&stack.metadata_store, &HashSet::from([kept]), &sink)
+            .await
+            .unwrap();
+        let reclaimed: Vec<String> = sink
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|action| match action {
+                Action::ReclaimListing(digest) => Some(digest.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reclaimed,
+            vec![stray.to_string()],
+            "the stray layer once, the kept one never"
+        );
     }
 }

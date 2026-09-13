@@ -19,7 +19,7 @@ Browse what an image contains, layer by layer, and open any file, from the web U
 2. The manifest page fetches the listing of each layer and merges them the way a runtime does: an entry replaces the lower layers' one, a whiteout removes a path, an opaque marker empties a directory.
 3. Opening a file decodes the layer from the nearest checkpoint to the file's offset, so a file deep in a large layer costs a few megabytes of decoding, not the whole layer.
 
-The listing is derived from the blob and shared like it: two images with the same layer share one listing, and it goes when the blob is reclaimed. zstd-compressed layers are not indexed.
+The listing is derived from the blob and shared like it: two images with the same layer share one listing, and it goes when the blob is reclaimed, or when `angos reconcile index` runs while no `index = true` repository uses the layer. zstd-compressed layers are not indexed.
 
 ---
 
@@ -54,7 +54,9 @@ The flag covers images from then on. To have the listings of the images already 
 angos -c config.toml reconcile index
 ```
 
-It enqueues one job per tar layer without a listing, a shared layer once; `--dry-run` lists them, and `--force` walks every layer again. The server or a worker drains the jobs as usual.
+It enqueues one job per tar layer without a listing, a shared layer once, and reclaims the listings of the layers no `index = true` repository uses; `--dry-run` lists both, and `--force` walks every layer again. The server or a worker drains the jobs as usual.
+
+To stop indexing a repository, drop its `index = true` and run the same command: the listings its images accumulated go, while any image still indexes itself the first time someone opens its filesystem.
 
 ---
 

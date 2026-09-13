@@ -113,6 +113,9 @@ pub enum Action {
     /// Enqueue the filesystem indexing of a layer; a forced one walks it
     /// again even when a listing exists.
     EnqueueIndex(IndexLayerPayload),
+    /// Delete a layer's listing and checkpoints: no `index = true` repository
+    /// holds an image using the layer, so its listing lives on demand only.
+    ReclaimListing(Digest),
     /// Enqueue a replication delete for a downstream-only tag, only on a
     /// `prune = true` downstream: absence-driven deletion would destroy an
     /// active-active peer's not-yet-replicated newer tag.
@@ -284,6 +287,7 @@ impl fmt::Display for Action {
                     index.namespace, index.digest
                 )
             }
+            Action::ReclaimListing(digest) => write!(f, "reclaim listing of layer '{digest}'"),
             Action::EnqueueScan(scan) => {
                 let forced = if scan.force { " (forced)" } else { "" };
                 write!(

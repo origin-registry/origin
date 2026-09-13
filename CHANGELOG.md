@@ -18,11 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Orphan-job clearing, the deletion of queued jobs whose downstream or repository is no longer configured, moved from `angos prune` to `angos scrub`, next to the other derivable state scrub reclaims; prune keeps retention, upload leftovers and orphan namespaces.
 - The manifest view splits its detail into tabs, OCI, Pull History, Vulnerabilities (with the finding count) and Filesystem, the last two only when available, each but OCI addressed by a `#` anchor, the platform shown on an index's report following it, so a tab can be linked to; the standalone vulnerability report page was folded into the tab and removed.
 - The web UI was redesigned around a calmer, document-like look: a single top bar carries the registry name, the breadcrumb trail, the page links and the theme switcher, pages open with a title, panels and tables use hairline rules and soft tag colours, and the bundled fonts gave way to the system UI font.
 - A manifest page is titled by the full name it was opened by, `namespace:tag` or `namespace@digest`, with a copy button.
 - A multi-platform index shows the vulnerabilities of its platform manifests in the same panel as an image, with one tab per platform.
-- `angos reconcile index` enqueues a filesystem index job for every tar layer of an `index = true` repository that has no listing, or for every layer with `--force`, so listings are ready before an image is first opened.
+- `angos reconcile index` enqueues a filesystem index job for every tar layer of an `index = true` repository that has no listing, or for every layer with `--force`, so listings are ready before an image is first opened, and reclaims the listings no `index = true` repository uses, so dropping the flag and running it frees what on-demand opens left behind; `angos scrub` runs the same reclaim after its walk.
 - The Jobs page has one URL per queue, `/jobs/cache`, `/jobs/replication` and `/jobs/scan`, so a queue can be linked to; `/jobs` opens the cache queue.
 - **Breaking:** `angos replicate` is now `angos reconcile replication`; options and behaviour are unchanged.
 - **Breaking:** a referrer such as a signature, an SBOM or a scan report no longer pins its subject against retention and is no longer judged as untagged content of its own: `angos prune` skips it while its subject resolves and reclaims it with the subject in the same run.

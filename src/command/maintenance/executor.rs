@@ -554,6 +554,14 @@ impl Executor {
             .map_err(|e| Error::JobQueue(format!("failed to enqueue index job: {e}")))
     }
 
+    async fn reclaim_listing(&self, digest: Digest) -> Result<(), Error> {
+        self.metadata_store
+            .object_store()
+            .delete_prefix(&digest.layer_dir())
+            .await
+            .map_err(|e| Error::from(RegistryError::from(e)))
+    }
+
     async fn enqueue_replication_delete(
         &self,
         downstream: String,
@@ -741,6 +749,7 @@ impl ActionSink for Executor {
             }
             Action::EnqueueScan(scan) => self.enqueue_scan(scan).await,
             Action::EnqueueIndex(index) => self.enqueue_index(index).await,
+            Action::ReclaimListing(digest) => self.reclaim_listing(digest).await,
             Action::EnqueueReplicationDelete {
                 downstream,
                 namespace,
@@ -848,6 +857,29 @@ mod tests {
                 blob_store.read(&orphan_digest).await.is_err(),
                 "real-run must delete the blob"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn executor_reclaim_listing_deletes_the_layer_directory() {
+        for_each_backend(async |test_case| {
+            let metadata_store = test_case.metadata_store();
+            let store = metadata_store.object_store();
+            let layer = Digest::sha256_of_bytes(b"listed layer");
+            for key in [layer.layer_entries_path(), layer.layer_checkpoints_path()] {
+                store.put(&key, Bytes::from_static(b"{}")).await.unwrap();
+            }
+
+            let executor = Executor::new_for_test(test_case.blob_store(), metadata_store.clone());
+            executor
+                .apply(Action::ReclaimListing(layer.clone()))
+                .await
+                .unwrap();
+
+            for key in [layer.layer_entries_path(), layer.layer_checkpoints_path()] {
+                assert!(store.get(&key).await.is_err(), "{key} must be gone");
+            }
         })
         .await;
     }

@@ -165,6 +165,14 @@ fn parse_ref_digest(s: &str) -> Option<Digest> {
     Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()
 }
 
+/// The layer a listing key names, `v2/layers/<algorithm>/<prefix>/<hash>/...`.
+pub fn parse_layer_key(key: &str) -> Option<Digest> {
+    let mut parts = key.strip_prefix(LAYERS_ROOT)?.strip_prefix('/')?.split('/');
+    let algorithm = Algorithm::from_str(parts.next()?).ok()?;
+    let _prefix = parts.next()?;
+    Digest::with_algorithm(algorithm, parts.next()?).ok()
+}
+
 /// Every current-shape storage key addressed by a namespace.
 pub trait NamespaceKeys {
     /// Directory holding every tag-entry directory of the namespace,
