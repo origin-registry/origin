@@ -384,7 +384,7 @@
 									</td>
 									<td class="nowrap">
 										<AttestationBadge type={getAttestationType(ref)} />
-										<ScanSummary annotations={ref.annotations} />
+										<ScanSummary annotations={ref.annotations} compact />
 									</td>
 									<td></td>
 									<td></td>
@@ -432,7 +432,7 @@
 							</td>
 							<td class="nowrap">
 								<AttestationBadge type={getAttestationType(ref)} />
-								<ScanSummary annotations={ref.annotations} />
+								<ScanSummary annotations={ref.annotations} compact />
 							</td>
 						</tr>
 					{/each}
